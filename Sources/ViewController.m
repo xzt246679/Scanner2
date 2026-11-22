@@ -128,7 +128,7 @@ static NSUInteger const kMaxDisplayLen = 200000;
             show = [show stringByAppendingString:@"\n…(显示截断)"];
         }
         self.textView.text = show;
-        [self.textView setContentOffset:CGPointZero animated:NO];
+        [self.textView setContentOffset:CGPointMake(0, 0) animated:NO];
     });
 }
 
@@ -350,3 +350,4 @@ static NSUInteger const kMaxDisplayLen = 200000;
 }
 
 @end
+
