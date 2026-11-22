@@ -261,11 +261,11 @@ static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024; // 总�
         return;
     }
     [self log:@"目标: %@", root];
+    [self log:@"App 沙盒: %@", NSHomeDirectory()];
 
     NSString *destRoot = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/export"];
     NSFileManager *fm = [NSFileManager defaultManager];
 
-    // 清空旧 export
     if ([fm fileExistsAtPath:destRoot]) {
         [fm removeItemAtPath:destRoot error:NULL];
     }
@@ -277,20 +277,87 @@ static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024; // 总�
     [self copyTree:root dest:destRoot rel:@"" depth:0 maxDepth:6];
 
     [self log:@""];
-    [self log:@"========== 导出汇总 =========="];
+    [self log:@"========== 导出完成 =========="];
     [self log:@"文件数: %ld", (long)self.exportedCount];
     [self log:@"总大小: %.2f MB", self.exportedBytes / 1048576.0];
-    [self log:@"位置: 文档/export/"];
-    [self log:@""];
-    [self log:@"👉 打开「文件」App → 我的 iPhone → 沙盒扫描 → export"];
-    [self log:@"👉 长按 export 文件夹 → 压缩 → 分享给我"];
 
     // 写清单
     NSString *idx = [destRoot stringByAppendingPathComponent:@"_index.txt"];
-    [[self.exportLog componentsJoinedByString:@"\n"] writeToFile:idx atomically:YES
-                                                       encoding:NSUTF8StringEncoding error:NULL];
+    NSString *misc = [NSString stringWithFormat:
+        @"target=%s\nuid=%d\nios=%@\nmodel=%@\nfiles=%ld\nbytes=%llu\n\n%@",
+        kTargetBundle.UTF8String, getuid(),
+        [[UIDevice currentDevice] systemVersion], [self machineModel],
+        (long)self.exportedCount, self.exportedBytes,
+        [self.exportLog componentsJoinedByString:@"\n"]];
+    [misc writeToFile:idx atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+
     [self log:@""];
-    [self log:@"清单已写入 _index.txt"];
+    [self log:@"正在打包 zip…"];
+    NSString *zipPath = [self makeZipFrom:destRoot];
+    if (zipPath) {
+        NSDictionary *za = [fm attributesOfItemAtPath:zipPath error:NULL];
+        unsigned long long zsz = [za[NSFileSize] unsignedLongLongValue];
+        [self log:@"✅ zip: %@ (%.2f MB)", [zipPath lastPathComponent], zsz / 1048576.0];
+        [self log:@""];
+        [self log:@"即将弹出分享菜单 → 选「微信」发给文件传输助手"];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self shareFile:zipPath];
+        });
+    } else {
+        [self log:@"❌ zip 打包失败"];
+        [self log:@"改为：打开「文件」App → 我的 iPhone → 沙盒扫描 → export"];
+    }
+}
+
+- (NSString *)makeZipFrom:(NSString *)dir {
+    NSURL *dirURL = [NSURL fileURLWithPath:dir];
+    NSFileCoordinator *coord = [[NSFileCoordinator alloc] init];
+    NSError *err = nil;
+    __block BOOL ok = NO;
+    NSString *dst = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/export.zip"];
+    [[NSFileManager defaultManager] removeItemAtPath:dst error:NULL];
+
+    [coord coordinateReadingItemAtURL:dirURL
+                              options:NSFileCoordinatorReadingForUploading
+                                error:&err
+                           byAccessor:^(NSURL *newURL) {
+        NSError *e2 = nil;
+        ok = [[NSFileManager defaultManager] copyItemAtURL:newURL
+                                                     toURL:[NSURL fileURLWithPath:dst]
+                                                     error:&e2];
+        if (!ok) {
+            [self log:@"copy zip 失败: %@", e2.localizedDescription];
+        }
+    }];
+
+    if (err) {
+        [self log:@"coordinator 错误: %@", err.localizedDescription];
+    }
+    return ok ? dst : nil;
+}
+
+- (void)shareFile:(NSString *)path {
+    NSURL *url = [NSURL fileURLWithPath:path];
+    UIActivityViewController *avc =
+        [[UIActivityViewController alloc] initWithActivityItems:@[url] applicationActivities:nil];
+
+    // iPad 需要 popover
+    if ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) {
+        avc.popoverPresentationController.sourceView = self.view;
+        avc.popoverPresentationController.sourceRect =
+            CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 1, 1);
+    }
+    avc.completionWithItemsHandler = ^(UIActivityType t, BOOL done, NSArray *items, NSError *e) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (done) {
+                self.statusLabel.text = @"已分享";
+            } else {
+                self.statusLabel.text = @"已取消分享（文件仍在 Documents/export.zip）";
+            }
+        });
+    };
+    [self presentViewController:avc animated:YES completion:nil];
 }
 
 - (void)copyTree:(NSString *)src dest:(NSString *)dest rel:(NSString *)rel
