@@ -12,6 +12,25 @@ workflows:
           sw_vers
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
+          echo "=== ldid 来源 ==="
+          brew --prefix 2>/dev/null || true
+          ls -la /opt/homebrew/bin/ldid 2>/dev/null || echo "homebrew ldid 不存在"
+
+      - name: Install ldid from source
+        script: |
+          set -e
+          echo "=== 用 git clone 编译 ldid（避开 brew 版本 bug）==="
+          cd "$CM_BUILD_DIR"
+          rm -rf ldid-src
+          git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ldid-src
+          cd ldid-src
+          git submodule update --init --recursive 2>/dev/null || true
+          make -j4
+          ls -la ./ldid
+          cp ./ldid "$CM_BUILD_DIR/ldid-custom"
+          chmod +x "$CM_BUILD_DIR/ldid-custom"
+          echo "=== 自定义 ldid 版本 ==="
+          "$CM_BUILD_DIR/ldid-custom" -h 2>&1 | head -5 || true
 
       - name: Compile Swift sources
         script: |
@@ -33,89 +52,78 @@ workflows:
           chmod +x "$APP/SandboxScanner"
           echo "=== compiled ==="
           ls -la "$APP"
-          file "$APP/SandboxScanner"
 
-      - name: Normalize entitlements
+      - name: Prepare entitlements
         script: |
           set -e
           python3 - <<'PYEOF'
-          import plistlib, sys
+          import plistlib
 
-          src = "SandboxScanner.entitlements"
-          dst = "simple.entitlements"
-
-          with open(src, "rb") as f:
-              d = plistlib.load(f)
-
-          # 只保留 ldid 能正常处理的安全 key
-          keep = {}
-          for k in [
-              "application-identifier",
-              "com.apple.developer.team-identifier",
-              "get-task-allow",
-              "platform-application",
-              "com.apple.private.security.no-sandbox",
-              "com.apple.private.security.container-required",
-              "com.apple.private.security.storage.AppDataContainers",
-              "keychain-access-groups",
-          ]:
-              if k in d:
-                  keep[k] = d[k]
-
-          with open(dst, "wb") as f:
-              plistlib.dump(keep, f, fmt=plistlib.FMT_XML)
-
-          print("=== normalized entitlements keys ===")
-          for k in keep:
-              print("  ", k)
+          ent = {
+              "application-identifier": "com.coldcoffee.sandboxscanner",
+              "com.apple.developer.team-identifier": "COLDFCOFFEE",
+              "get-task-allow": True,
+              "platform-application": True,
+              "com.apple.private.security.no-sandbox": True,
+              "com.apple.private.security.container-required": False,
+              "com.apple.private.security.storage.AppDataContainers": True,
+              "com.apple.private.skip-library-validation": True,
+              "keychain-access-groups": ["com.coldcoffee.sandboxscanner"],
+          }
+          with open("final.entitlements", "wb") as f:
+              plistlib.dump(ent, f, fmt=plistlib.FMT_XML)
+          print("written final.entitlements")
           PYEOF
-          echo "--- file ---"
-          cat simple.entitlements
+          cat final.entitlements
 
-      - name: Sign with ldid
+      - name: Sign with custom ldid
         script: |
           set +e
           APP=build/Payload/SandboxScanner.app
           BIN="$APP/SandboxScanner"
+          LDID="$CM_BUILD_DIR/ldid-custom"
 
-          LDID=""
-          for C in /opt/homebrew/bin/ldid /usr/local/bin/ldid; do
-            if [ -x "$C" ]; then LDID="$C"; break; fi
-          done
-          echo "ldid = $LDID"
+          echo "=== signing with: $LDID ==="
+          "$LDID" -Sfinal.entitlements "$BIN"
+          RC=$?
+          echo "exit code: $RC"
 
-          if [ -z "$LDID" ]; then
-            echo "ldid 不存在，跳过签名（TrollStore 安装时不校验签名）"
-            exit 0
+          if [ $RC -ne 0 ]; then
+            echo "!!! 签名失败，尝试 brew ldid !!!"
+            if [ -x /opt/homebrew/bin/ldid ]; then
+              /opt/homebrew/bin/ldid -Sfinal.entitlements "$BIN"
+              echo "brew ldid exit: $?"
+            fi
           fi
 
-          echo "=== attempt 1: simple.entitlements ==="
-          "$LDID" -Ssimple.entitlements "$BIN" && echo "OK1" && exit 0
+          echo "=== 读回 entitlements（关键验证）==="
+          "$LDID" -e "$BIN" 2>&1 | head -60
 
-          echo "=== attempt 2: minimal inline ==="
-          printf '%s' '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>platform-application</key><true/><key>com.apple.private.security.no-sandbox</key><true/><key>get-task-allow</key><true/></dict></plist>' > minimal.entitlements
-          "$LDID" -Sminimal.entitlements "$BIN" && echo "OK2" && exit 0
+          echo "=== codesign 信息 ==="
+          codesign -dv --entitlements :- "$BIN" 2>&1 | head -40
 
-          echo "=== attempt 3: 无 entitlements 签名 ==="
-          "$LDID" -S "$BIN" && echo "OK3" && exit 0
-
-          echo "全部签名方式失败，继续打包（TrollStore 仍可安装）"
-          exit 0
-
-      - name: Verify entitlements
+      - name: Verify entitlements contains no-sandbox
         script: |
-          set +e
+          set -e
           APP=build/Payload/SandboxScanner.app
           BIN="$APP/SandboxScanner"
-          LDID=""
-          for C in /opt/homebrew/bin/ldid /usr/local/bin/ldid; do
-            if [ -x "$C" ]; then LDID="$C"; break; fi
-          done
-          echo "=== entitlements readback ==="
-          [ -n "$LDID" ] && "$LDID" -e "$BIN" 2>&1 | head -40
-          echo "=== codesign info ==="
-          codesign -dv "$BIN" 2>&1 | head -20
-          echo DONE
+          LDID="$CM_BUILD_DIR/ldid-custom"
+
+          OUT=$("$LDID" -e "$BIN" 2>&1 || true)
+          echo "$OUT"
+
+          if echo "$OUT" | grep -q "no-sandbox"; then
+            echo "✅ entitlements 包含 no-sandbox"
+          else
+            echo "❌ entitlements 缺少 no-sandbox —— 装机后不会有权限"
+            echo "继续打包，但需要换方案"
+          fi
+
+          if echo "$OUT" | grep -q "platform-application"; then
+            echo "✅ entitlements 包含 platform-application"
+          else
+            echo "❌ entitlements 缺少 platform-application"
+          fi
 
       - name: Package IPA
         script: |
