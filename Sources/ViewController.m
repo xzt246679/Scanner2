@@ -262,16 +262,18 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     return !self.aborted;
 }
 
-// A：直接列容器目录
+// A：直接列容器目录（权限已生效时最有效）
 - (NSString *)findContainerDirect {
     NSString *base = @"/var/mobile/Containers/Data/Application";
     NSError *err = nil;
     NSArray *dirs = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:base error:&err];
     if (!dirs) {
-        [self log:@"  目录不可读"];
+        [self log:@"  容器目录不可读: %@", err.localizedDescription];
         return nil;
     }
     [self log:@"  容器数 %lu", (unsigned long)dirs.count];
+
+    // 第一轮：精确匹配 metadata
     for (NSString *d in dirs) {
         if (![self bumpVisit]) return nil;
         NSString *meta = [NSString stringWithFormat:@"%@/%@/.com.apple.mobile_container_manager.metadata.plist", base, d];
@@ -281,7 +283,44 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
             return [NSString stringWithFormat:@"%@/%@", base, d];
         }
     }
-    [self log:@"  未命中 %@", kTargetBundle];
+    [self log:@"  metadata 未命中，做第二轮关键词匹配"];
+    // 第二轮：关键词（有些容器 metadata 不同步）
+    for (NSString *d in dirs) {
+        if (![self bumpVisit]) return nil;
+        NSString *meta = [NSString stringWithFormat:@"%@/%@/.com.apple.mobile_container_manager.metadata.plist", base, d];
+        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:meta];
+        NSString *ident = dict[@"MCMMetadataIdentifier"];
+        if (ident && ([ident containsString:@"dfmc"] || [ident containsString:@"dfpv"] ||
+                      [ident containsString:@"sapp"])) {
+            [self log:@"  近似命中: %@", ident];
+            return [NSString stringWithFormat:@"%@/%@", base, d];
+        }
+    }
+    // 第三轮：看目录里有没有东风奕派的特征
+    for (NSString *d in dirs) {
+        if (![self bumpVisit]) return nil;
+        NSString *p = [NSString stringWithFormat:@"%@/%@/Documents", base, d];
+        NSArray *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:p error:NULL];
+        if (!items) continue;
+        for (NSString *it in items) {
+            if ([it containsString:@"digitalkey"] || [it containsString:@"ingeek"] ||
+                [it containsString:@"carkey"] || [it hasPrefix:@"c11_"] ||
+                [it hasPrefix:@"icce"]) {
+                [self log:@"  特征命中: %@/%@", d, it];
+                return [NSString stringWithFormat:@"%@/%@", base, d];
+            }
+        }
+    }
+    [self log:@"  三轮匹配均未命中"];
+    // 打印前 30 个容器名帮助诊断
+    [self log:@"  容器列表（前30）:"];
+    NSInteger i = 0;
+    for (NSString *d in dirs) {
+        NSString *meta = [NSString stringWithFormat:@"%@/%@/.com.apple.mobile_container_manager.metadata.plist", base, d];
+        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:meta];
+        [self log:@"    %@", dict[@"MCMMetadataIdentifier"] ?: @"?"];
+        if (++i >= 30) break;
+    }
     return nil;
 }
 
@@ -389,9 +428,19 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     NSArray *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:NULL];
     if (!items) { [self log:@"%@[不可读]", indent]; return; }
     NSInteger n = 0;
+    NSInteger skipped = 0;
     for (NSString *name in [items sortedArrayUsingSelector:@selector(compare:)]) {
         if (![self bumpVisit]) return;
-        if (++n > 400) { [self log:@"%@…(超过400项，略)", indent]; return; }
+        // 跳过资源文件，避免刷屏卡死
+        NSString *lower = [name lowercaseString];
+        BOOL isAsset = [lower hasSuffix:@".png"] || [lower hasSuffix:@".jpg"] ||
+                       [lower hasSuffix:@".jpeg"] || [lower hasSuffix:@".gif"] ||
+                       [lower hasSuffix:@".svg"] || [lower hasSuffix:@".pdf"] ||
+                       [lower hasSuffix:@".ttf"] || [lower hasSuffix:@".otf"] ||
+                       [lower hasSuffix:@".car"] || [lower hasSuffix:@".mp3"] ||
+                       [lower hasSuffix:@".mp4"] || [lower hasSuffix:@".lottie"];
+        if (isAsset) { skipped++; continue; }
+        if (++n > 200) { [self log:@"%@…(超过200项，略。已跳过资源 %ld 个)", indent, (long)skipped]; return; }
         NSString *full = [path stringByAppendingPathComponent:name];
         BOOL isDir = NO;
         if (![[NSFileManager defaultManager] fileExistsAtPath:full isDirectory:&isDir]) continue;
@@ -402,6 +451,9 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
             NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:full error:NULL];
             [self log:@"%@[F] %@ (%lluB)", indent, name, [attrs[NSFileSize] unsignedLongLongValue]];
         }
+    }
+    if (skipped > 0) {
+        [self log:@"%@  (另有 %ld 个资源文件已跳过)", indent, (long)skipped];
     }
 }
 
