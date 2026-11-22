@@ -1,36 +1,27 @@
 #import "ViewController.h"
 #import <CoreBluetooth/CoreBluetooth.h>
 
-static NSString *const kDeviceName   = @"东风blekey-044289LE";
-static NSString *const kServiceUUID  = @"FF00";
-static NSString *const kNotifyCharID = @"FF01";
-static NSString *const kWriteCharID  = @"FF02";
+static NSString *const kDeviceName = @"东风blekey-044289LE";
 
-// 已抓到的帧（按时间顺序）
+// 已抓到的帧
 typedef struct {
     const char *label;
     const char *hex;
-    int isCommand;      // 1 = 命令帧（发 FF02），0 = 仅记录
 } FrameDef;
 
 static FrameDef kFrames[] = {
-    // 21:19:37 开锁（用户标注）
     {"【开锁】21:19:37",
-     "5002240100375D198A25F42A1285468C3AC35953385514A5678492C82D9DF4DF6BA870A8DE4DC21B84E0A88E04826BDE01D311F0919782F1", 1},
-    // 21:19:44 闭锁（用户标注）
+     "5002240100375D198A25F42A1285468C3AC35953385514A5678492C82D9DF4DF6BA870A8DE4DC21B84E0A88E04826BDE01D311F0919782F1"},
     {"【闭锁】21:19:44",
-     "5002240100375D191AA88C24CEE66C751E7221DA4DE53D73A6BE39B0E649C4CF1957FB1A4BD5360546BA658557DCBEEC05A5397108C2CAE6", 1},
-    // 20:49:10 未知（可能是解锁）
+     "5002240100375D191AA88C24CEE66C751E7221DA4DE53D73A6BE39B0E649C4CF1957FB1A4BD5360546BA658557DCBEEC05A5397108C2CAE6"},
     {"【未知】20:49:10",
-     "5002240100375D19786683B96AEA6F0793BF5427258A8E5EE38F16C3643CF4C3F1F930E80E453BC1EEEC24A4984CA6E8D720C588676D7009", 1},
-    // 21:00:02 未知
+     "5002240100375D19786683B96AEA6F0793BF5427258A8E5EE38F16C3643CF4C3F1F930E80E453BC1EEEC24A4984CA6E8D720C588676D7009"},
     {"【未知】21:00:02",
-     "5002240100375D19296706DA8882FDB6CB2719F2A0D5BDDC4C58E8B85EEBF345661D950B5DE8B047B6D0CD87CE8463D437B2A69218734815", 1},
-    // 握手帧
+     "5002240100375D19296706DA8882FDB6CB2719F2A0D5BDDC4C58E8B85EEBF345661D950B5DE8B047B6D0CD87CE8463D437B2A69218734815"},
     {"【握手】21:19:32",
-     "50231001507DF61D10458F9C8C0E201716EC888695A2D4D0BAC33F47A8972134F0B40F93", 1},
+     "50231001507DF61D10458F9C8C0E201716EC888695A2D4D0BAC33F47A8972134F0B40F93"},
     {"【握手】21:00:01",
-     "50231001B4E2BC0155AA8DF3A5D1C4E8CC02C80BD367E6CF395AD20BDF23C04567F1666A", 1},
+     "50231001B4E2BC0155AA8DF3A5D1C4E8CC02C80BD367E6CF395AD20BDF23C04567F1666A"},
 };
 #define FRAME_COUNT (sizeof(kFrames) / sizeof(kFrames[0]))
 
@@ -39,18 +30,20 @@ static FrameDef kFrames[] = {
 @property (nonatomic, strong) CBPeripheral *peripheral;
 @property (nonatomic, strong) CBCharacteristic *notifyChar;
 @property (nonatomic, strong) CBCharacteristic *writeChar;
+@property (nonatomic, strong) CBService *ff00Service;
 @property (nonatomic, strong) UITextView *textView;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) NSMutableString *log;
 @property (nonatomic, assign) BOOL wantConnect;
+@property (nonatomic, assign) BOOL notifyConfirmed;
 @end
 
 @implementation ViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"BLE 重放测试";
+    self.title = @"BLE 诊断";
     self.log = [NSMutableString string];
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
@@ -87,7 +80,7 @@ static FrameDef kFrames[] = {
         [sv.topAnchor constraintEqualToAnchor:sl.bottomAnchor constant:6],
         [sv.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:4],
         [sv.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-4],
-        [sv.heightAnchor constraintEqualToConstant:130],
+        [sv.heightAnchor constraintEqualToConstant:200],
         [tv.topAnchor constraintEqualToAnchor:sv.bottomAnchor constant:6],
         [tv.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:4],
         [tv.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-4],
@@ -103,16 +96,16 @@ static FrameDef kFrames[] = {
 }
 
 - (void)buildButtons {
-    CGFloat bw = 168, bh = 38, gap = 6;
+    CGFloat bw = 168, bh = 34, gap = 6;
     CGFloat y = gap;
 
-    // 顶部控制按钮
-    NSArray *top = @[@"① 开始扫描连接", @"② 断开"];
+    // 顶部控制
+    NSArray *top = @[@"① 连接", @"② 断开"];
     SEL topActs[2] = {@selector(startScan), @selector(disconnect)};
     for (NSInteger i = 0; i < 2; i++) {
         UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
         [b setTitle:top[i] forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+        b.titleLabel.font = [UIFont boldSystemFontOfSize:12];
         [b addTarget:self action:topActs[i] forControlEvents:UIControlEventTouchUpInside];
         b.frame = CGRectMake(gap + i * (bw + gap), y, bw, bh);
         b.layer.borderWidth = 1.2;
@@ -122,22 +115,41 @@ static FrameDef kFrames[] = {
     }
     y += bh + gap * 2;
 
-    // 帧按钮（每个帧两个按钮：WRITE / WRITE_NO_RESPONSE）
+    // 诊断按钮
+    NSArray *diag = @[@"③ 读 FF01", @"④ 读 FF02", @"⑤ 重订阅 FF01", @"⑥ 读所有描述符"];
+    SEL diagActs[4] = {@selector(readFF01), @selector(readFF02),
+                       @selector(resubscribe), @selector(readAllDesc)};
+    for (NSInteger i = 0; i < 4; i++) {
+        NSInteger row = i / 2;
+        NSInteger col = i % 2;
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+        [b setTitle:diag[i] forState:UIControlStateNormal];
+        b.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+        [b addTarget:self action:diagActs[i] forControlEvents:UIControlEventTouchUpInside];
+        b.frame = CGRectMake(gap + col * (bw + gap), y + row * (bh + gap), bw, bh);
+        b.backgroundColor = [UIColor systemOrangeColor];
+        [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        b.layer.cornerRadius = 5;
+        [self.scroll addSubview:b];
+    }
+    y += 2 * (bh + gap) + gap;
+
+    // 帧按钮
     for (NSInteger i = 0; i < FRAME_COUNT; i++) {
         UILabel *lb = [[UILabel alloc] init];
         lb.text = [NSString stringWithUTF8String:kFrames[i].label];
         lb.font = [UIFont boldSystemFontOfSize:11];
         lb.textColor = [UIColor darkGrayColor];
-        lb.frame = CGRectMake(gap, y, 340, 16);
+        lb.frame = CGRectMake(gap, y, 340, 15);
         [self.scroll addSubview:lb];
-        y += 18;
+        y += 17;
 
         UIButton *b1 = [UIButton buttonWithType:UIButtonTypeSystem];
         [b1 setTitle:@"WRITE" forState:UIControlStateNormal];
         b1.titleLabel.font = [UIFont boldSystemFontOfSize:11];
         b1.tag = i * 2;
         [b1 addTarget:self action:@selector(sendFrame:) forControlEvents:UIControlEventTouchUpInside];
-        b1.frame = CGRectMake(gap, y, 100, 32);
+        b1.frame = CGRectMake(gap, y, 100, 30);
         b1.backgroundColor = [UIColor systemBlueColor];
         [b1 setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         b1.layer.cornerRadius = 5;
@@ -148,13 +160,13 @@ static FrameDef kFrames[] = {
         b2.titleLabel.font = [UIFont boldSystemFontOfSize:11];
         b2.tag = i * 2 + 1;
         [b2 addTarget:self action:@selector(sendFrame:) forControlEvents:UIControlEventTouchUpInside];
-        b2.frame = CGRectMake(gap + 106, y, 110, 32);
+        b2.frame = CGRectMake(gap + 106, y, 110, 30);
         b2.backgroundColor = [UIColor systemGreenColor];
         [b2 setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         b2.layer.cornerRadius = 5;
         [self.scroll addSubview:b2];
 
-        y += 32 + gap * 2;
+        y += 30 + gap * 2;
     }
 
     self.scroll.contentSize = CGSizeMake(340, y + 20);
@@ -163,18 +175,14 @@ static FrameDef kFrames[] = {
 #pragma mark - 日志
 
 - (void)say:(NSString *)fmt, ... {
-    va_list a;
-    va_start(a, fmt);
+    va_list a; va_start(a, fmt);
     NSString *s = [[NSString alloc] initWithFormat:fmt arguments:a];
     va_end(a);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.statusLabel.text = s;
-    });
+    dispatch_async(dispatch_get_main_queue(), ^{ self.statusLabel.text = s; });
 }
 
 - (void)log:(NSString *)fmt, ... {
-    va_list a;
-    va_start(a, fmt);
+    va_list a; va_start(a, fmt);
     NSString *s = [[NSString alloc] initWithFormat:fmt arguments:a];
     va_end(a);
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
@@ -194,11 +202,15 @@ static FrameDef kFrames[] = {
     [self say:@"已复制 %lu 字符", (unsigned long)self.log.length];
 }
 
-#pragma mark - BLE
+#pragma mark - BLE 控制
 
 - (void)startScan {
     [self.log setString:@""];
     self.wantConnect = YES;
+    self.notifyConfirmed = NO;
+    self.notifyChar = nil;
+    self.writeChar = nil;
+    self.ff00Service = nil;
     self.central = [[CBCentralManager alloc] initWithDelegate:self queue:nil
                                                        options:@{CBCentralManagerOptionShowPowerAlertKey: @YES}];
     [self say:@"初始化中…"];
@@ -214,19 +226,14 @@ static FrameDef kFrames[] = {
 
 - (void)centralManagerDidUpdateState:(CBCentralManager *)central {
     [self log:@"蓝牙状态: %ld", (long)central.state];
-    if (central.state == CBManagerStatePoweredOn) {
-        if (self.wantConnect) {
-            [self log:@"开始扫描 name=%@", kDeviceName];
-            [central scanForPeripheralsWithServices:nil
-                                            options:@{CBCentralManagerScanOptionAllowDuplicatesKey: @NO}];
-            [self say:@"扫描中…"];
-        }
+    if (central.state == CBManagerStatePoweredOn && self.wantConnect) {
+        [self log:@"开始扫描（不过滤 service，靠名字匹配）"];
+        [central scanForPeripheralsWithServices:nil
+                                        options:@{CBCentralManagerScanOptionAllowDuplicatesKey: @NO}];
+        [self say:@"扫描中…"];
     } else if (central.state == CBManagerStateUnauthorized) {
         [self log:@"❌ 蓝牙权限被拒绝"];
         [self say:@"蓝牙权限被拒绝"];
-    } else if (central.state == CBManagerStatePoweredOff) {
-        [self log:@"❌ 蓝牙未开启"];
-        [self say:@"蓝牙未开启"];
     }
 }
 
@@ -238,101 +245,136 @@ static FrameDef kFrames[] = {
     NSString *name = peripheral.name ?: advertisementData[CBAdvertisementDataLocalNameKey] ?: @"(null)";
     NSArray *svc = advertisementData[CBAdvertisementDataServiceUUIDsKey];
 
-    // 只打目标车 + 前 5 个其他设备（避免刷屏）
-    BOOL isTarget = [name containsString:@"东风blekey"] || [name containsString:@"044289"];
-    if (!isTarget) return;
+    if (![name containsString:@"东风blekey"]) return;
 
-    [self log:@"★ 发现目标: name=%@ RSSI=%@ svc=%@", name, RSSI, svc];
+    [self log:@"★ 目标: %@  RSSI=%@  广播SVC=%@", name, RSSI, svc];
+
     if (peripheral.state == CBPeripheralStateDisconnected && self.wantConnect) {
         self.peripheral = peripheral;
         peripheral.delegate = self;
         [central stopScan];
-        [self log:@"停止扫描，开始连接 %@", name];
+        [self log:@"连接中…"];
         [self say:@"连接中…"];
         [central connectPeripheral:peripheral options:nil];
     }
 }
 
 - (void)centralManager:(CBCentralManager *)central didConnectPeripheral:(CBPeripheral *)peripheral {
-    [self log:@"✅ 已连接 %@", peripheral.name];
-    [self say:@"已连接，发现服务"];
+    [self log:@"✅ 已连接"];
+    [self say:@"发现服务"];
     [peripheral discoverServices:nil];
 }
 
 - (void)centralManager:(CBCentralManager *)central
-didFailToConnectPeripheral:(CBPeripheral *)peripheral
-                 error:(NSError *)error {
+didFailToConnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
     [self log:@"❌ 连接失败: %@", error.localizedDescription];
     [self say:@"连接失败"];
 }
 
 - (void)centralManager:(CBCentralManager *)central
-didDisconnectPeripheral:(CBPeripheral *)peripheral
-                 error:(NSError *)error {
-    [self log:@"⚠️ 已断开: %@", error.localizedDescription ?: @"(无错误)"];
+didDisconnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
+    [self log:@"⚠️ 已断开: %@", error.localizedDescription ?: @"(无)"];
     [self say:@"已断开"];
+    self.notifyConfirmed = NO;
     self.notifyChar = nil;
     self.writeChar = nil;
 }
 
 - (void)peripheral:(CBPeripheral *)peripheral didDiscoverServices:(NSError *)error {
-    if (error) {
-        [self log:@"发现服务失败: %@", error.localizedDescription];
-        return;
-    }
+    if (error) { [self log:@"发现服务失败: %@", error.localizedDescription]; return; }
     for (CBService *s in peripheral.services) {
         [self log:@"  服务 %@", s.UUID.UUIDString];
-    }
-    CBUUID *u = [CBUUID UUIDWithString:kServiceUUID];
-    for (CBService *s in peripheral.services) {
-        if ([s.UUID isEqual:u]) {
-            [self log:@"✓ 找到服务 FF00，发现特征"];
-            [peripheral discoverCharacteristics:nil forService:s];
-            return;
-        }
-    }
-    // FF00 可能是短 UUID
-    for (CBService *s in peripheral.services) {
         if ([[s.UUID.UUIDString uppercaseString] containsString:@"FF00"]) {
-            [self log:@"✓ 找到服务 %@，发现特征", s.UUID.UUIDString];
-            [peripheral discoverCharacteristics:nil forService:s];
-            return;
+            self.ff00Service = s;
         }
     }
-    [self log:@"❌ 未找到 FF00"];
+    if (self.ff00Service) {
+        [self log:@"✓ 找到 FF00，发现特征+描述符"];
+        [peripheral discoverCharacteristics:nil forService:self.ff00Service];
+    } else {
+        [self log:@"❌ 未找到 FF00"];
+    }
 }
 
 - (void)peripheral:(CBPeripheral *)peripheral
-didDiscoverCharacteristicsForService:(CBService *)service
-             error:(NSError *)error {
-    if (error) {
-        [self log:@"发现特征失败: %@", error.localizedDescription];
-        return;
-    }
+didDiscoverCharacteristicsForService:(CBService *)service error:(NSError *)error {
+    if (error) { [self log:@"发现特征失败: %@", error.localizedDescription]; return; }
+
     for (CBCharacteristic *c in service.characteristics) {
-        NSString *props = @"";
-        if (c.properties & CBCharacteristicPropertyNotify) props = [props stringByAppendingString:@"NOTIFY "];
-        if (c.properties & CBCharacteristicPropertyWrite) props = [props stringByAppendingString:@"WRITE "];
-        if (c.properties & CBCharacteristicPropertyWriteWithoutResponse) props = [props stringByAppendingString:@"WRITE_NR "];
-        if (c.properties & CBCharacteristicPropertyRead) props = [props stringByAppendingString:@"READ "];
-        [self log:@"  特征 %@ [%@]", c.UUID.UUIDString, props];
+        NSMutableString *props = [NSMutableString string];
+        if (c.properties & CBCharacteristicPropertyRead) [props appendString:@"READ "];
+        if (c.properties & CBCharacteristicPropertyWrite) [props appendString:@"WRITE "];
+        if (c.properties & CBCharacteristicPropertyWriteWithoutResponse) [props appendString:@"WRITE_NR "];
+        if (c.properties & CBCharacteristicPropertyNotify) [props appendString:@"NOTIFY "];
+        if (c.properties & CBCharacteristicPropertyIndicate) [props appendString:@"INDICATE "];
+        [self log:@"  特征 %@ [%@] desc=%lu",
+            c.UUID.UUIDString, props, (unsigned long)c.descriptors.count];
 
         NSString *us = [c.UUID.UUIDString uppercaseString];
         if ([us containsString:@"FF01"]) {
             self.notifyChar = c;
-            [peripheral setNotifyValue:YES forCharacteristic:c];
-            [self log:@"  → 订阅 FF01 通知"];
+            [peripheral discoverDescriptorsForCharacteristic:c];
         } else if ([us containsString:@"FF02"]) {
             self.writeChar = c;
-            [self log:@"  → 记录 FF02 写入特征"];
+            [peripheral discoverDescriptorsForCharacteristic:c];
         }
     }
-    if (self.notifyChar && self.writeChar) {
-        [self say:@"✅ 就绪，可以发帧"];
-        [self log:@"\n===== 就绪 ====="];
-        [self log:@"正确顺序：先发【握手】帧，等 1 秒，再发【开锁/闭锁】帧"];
-        [self log:@"每帧都有 WRITE 和 WRITE_NR 两种模式，各试一次"];
-        [self log:@""];
+
+    // 订阅 FF01
+    if (self.notifyChar) {
+        [self log:@"→ 调用 setNotifyValue:YES (FF01)"];
+        [peripheral setNotifyValue:YES forCharacteristic:self.notifyChar];
+        [self log:@"   等待 didUpdateNotificationState 回调…"];
+    }
+    [self say:@"等待通知确认…"];
+}
+
+- (void)peripheral:(CBPeripheral *)peripheral
+didDiscoverDescriptorsForCharacteristic:(CBCharacteristic *)characteristic
+             error:(NSError *)error {
+    if (error) return;
+    for (CBDescriptor *d in characteristic.descriptors) {
+        [self log:@"    描述符 %@ (%@)", d.UUID.UUIDString,
+            [characteristic.UUID.UUIDString substringToIndex:4]];
+        [peripheral readValueForDescriptor:d];
+    }
+}
+
+- (void)peripheral:(CBPeripheral *)peripheral
+didUpdateValueForDescriptor:(CBDescriptor *)descriptor error:(NSError *)error {
+    if (error) {
+        [self log:@"    描述符 %@ 读取失败: %@", descriptor.UUID.UUIDString, error.localizedDescription];
+        return;
+    }
+    id v = descriptor.value;
+    NSString *vs = @"?";
+    if ([v isKindOfClass:[NSData class]]) vs = [self hexString:v];
+    else if (v) vs = [v description];
+    [self log:@"    描述符 %@ = %@", descriptor.UUID.UUIDString, vs];
+}
+
+// ===== 关键：通知状态确认回调 =====
+- (void)peripheral:(CBPeripheral *)peripheral
+didUpdateNotificationStateForCharacteristic:(CBCharacteristic *)characteristic
+             error:(NSError *)error {
+    if (error) {
+        [self log:@"❌❌ 通知订阅失败 %@: %@", characteristic.UUID.UUIDString, error.localizedDescription];
+        [self say:@"订阅失败"];
+        return;
+    }
+    if (characteristic.isNotifying) {
+        self.notifyConfirmed = YES;
+        [self log:@"✅✅✅ 通知已确认开启 %@  (isNotifying=YES)", characteristic.UUID.UUIDString];
+        [self say:@"✅ 就绪·可发帧"];
+
+        // 顺便读一次 FF01 当前值
+        if (self.notifyChar &&
+            (self.notifyChar.properties & CBCharacteristicPropertyRead)) {
+            [self log:@"→ 读 FF01 当前值"];
+            [peripheral readValueForCharacteristic:self.notifyChar];
+        }
+    } else {
+        [self log:@"⚠️ 通知被关闭 %@", characteristic.UUID.UUIDString];
     }
 }
 
@@ -344,7 +386,8 @@ didUpdateValueForCharacteristic:(CBCharacteristic *)characteristic
         return;
     }
     NSData *d = characteristic.value;
-    [self log:@"⬇️ 收到 %luB: %@", (unsigned long)d.length, [self hexString:d]];
+    [self log:@"⬇️⬇️ 收到 %@ %luB: %@",
+        characteristic.UUID.UUIDString, (unsigned long)d.length, [self hexString:d]];
 }
 
 - (void)peripheral:(CBPeripheral *)peripheral
@@ -353,52 +396,85 @@ didWriteValueForCharacteristic:(CBCharacteristic *)characteristic
     if (error) {
         [self log:@"❌ 写入失败: %@", error.localizedDescription];
     } else {
-        [self log:@"✅ 写入确认"];
+        [self log:@"✅ 写入确认 %@", characteristic.UUID.UUIDString];
+    }
+}
+
+#pragma mark - 诊断操作
+
+- (void)readFF01 {
+    if (!self.notifyChar) { [self say:@"无 FF01"]; return; }
+    if (!(self.notifyChar.properties & CBCharacteristicPropertyRead)) {
+        [self log:@"FF01 不支持 READ"];
+        [self say:@"FF01 不可读"];
+        return;
+    }
+    [self log:@"→ 读 FF01"];
+    [self.peripheral readValueForCharacteristic:self.notifyChar];
+}
+
+- (void)readFF02 {
+    if (!self.writeChar) { [self say:@"无 FF02"]; return; }
+    if (!(self.writeChar.properties & CBCharacteristicPropertyRead)) {
+        [self log:@"FF02 不支持 READ"];
+        [self say:@"FF02 不可读"];
+        return;
+    }
+    [self log:@"→ 读 FF02"];
+    [self.peripheral readValueForCharacteristic:self.writeChar];
+}
+
+- (void)resubscribe {
+    if (!self.notifyChar) { [self say:@"无 FF01"]; return; }
+    [self log:@"→ 先关闭通知再开启（重订阅）"];
+    [self.peripheral setNotifyValue:NO forCharacteristic:self.notifyChar];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self log:@"→ 重新 setNotifyValue:YES"];
+        [self.peripheral setNotifyValue:YES forCharacteristic:self.notifyChar];
+    });
+}
+
+- (void)readAllDesc {
+    if (!self.ff00Service) { [self say:@"无服务"]; return; }
+    [self log:@"→ 重新发现所有描述符"];
+    for (CBCharacteristic *c in self.ff00Service.characteristics) {
+        [self.peripheral discoverDescriptorsForCharacteristic:c];
     }
 }
 
 #pragma mark - 发送
 
 - (void)sendFrame:(UIButton *)btn {
-    if (!self.writeChar) {
-        [self say:@"未就绪：特征未找到"];
-        return;
+    if (!self.writeChar) { [self say:@"无 FF02"]; return; }
+    if (!self.notifyConfirmed) {
+        [self log:@"⚠️ 通知尚未确认，仍尝试发送"];
     }
     NSInteger idx = btn.tag / 2;
     BOOL noResponse = (btn.tag % 2) == 1;
     if (idx < 0 || idx >= FRAME_COUNT) return;
 
-    const char *hexc = kFrames[idx].hex;
-    NSData *data = [self dataFromHex:[NSString stringWithUTF8String:hexc]];
-    if (!data) {
-        [self say:@"hex 解析失败"];
-        return;
-    }
+    NSData *data = [self dataFromHex:[NSString stringWithUTF8String:kFrames[idx].hex]];
+    if (!data) { [self say:@"hex 解析失败"]; return; }
 
     CBCharacteristicWriteType type = noResponse
-        ? CBCharacteristicWriteWithoutResponse
-        : CBCharacteristicWriteWithResponse;
+        ? CBCharacteristicWriteWithoutResponse : CBCharacteristicWriteWithResponse;
 
-    [self log:@"⬆️ 发送 %@ (%luB) 模式=%@",
+    [self log:@"⬆️ 发送 %@ %luB 模式=%@",
         [NSString stringWithUTF8String:kFrames[idx].label],
-        (unsigned long)data.length,
-        noResponse ? @"WRITE_NR" : @"WRITE"];
-    [self log:@"   hex: %@", [self hexString:data]];
-
+        (unsigned long)data.length, noResponse ? @"WRITE_NR" : @"WRITE"];
     [self.peripheral writeValue:data forCharacteristic:self.writeChar type:type];
-    [self say:@"已发送，看车门"];
+    [self say:@"已发送"];
 }
 
 - (NSData *)dataFromHex:(NSString *)hex {
-    NSString *s = [[hex stringByReplacingOccurrencesOfString:@" " withString:@""]
-                   stringByReplacingOccurrencesOfString:@"\n" withString:@""];
-    s = [s uppercaseString];
-    if (s.length % 2 != 0) return nil;
+    NSString *s = [[hex stringByReplacingOccurrencesOfString:@" " withString:@""] uppercaseString];
+    if (s.length % 2) return nil;
     NSMutableData *d = [NSMutableData data];
     for (NSUInteger i = 0; i < s.length; i += 2) {
-        NSString *pair = [s substringWithRange:NSMakeRange(i, 2)];
         unsigned int v = 0;
-        if (![[NSScanner scannerWithString:pair] scanHexInt:&v]) return nil;
+        if (![[NSScanner scannerWithString:[s substringWithRange:NSMakeRange(i, 2)]] scanHexInt:&v])
+            return nil;
         uint8_t b = (uint8_t)v;
         [d appendBytes:&b length:1];
     }
@@ -413,4 +489,3 @@ didWriteValueForCharacteristic:(CBCharacteristic *)characteristic
 }
 
 @end
-
