@@ -20,58 +20,44 @@ workflows:
           rm -rf build SandboxScanner.ipa
           mkdir -p "$APP"
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-
-          clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
-            -fobjc-arc -O2 \
-            -framework UIKit -framework Foundation -framework Security \
-            -o "$APP/SandboxScanner" \
-            Sources/main.m Sources/AppDelegate.m Sources/ViewController.m
-
+          clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 -fobjc-arc -O2 -framework UIKit -framework Foundation -framework Security -o "$APP/SandboxScanner" Sources/main.m Sources/AppDelegate.m Sources/ViewController.m
           cp Info.plist "$APP/Info.plist"
           chmod +x "$APP/SandboxScanner"
           ls -la "$APP"
 
-      - name: Write entitlements (v1 level: 6 keys only)
+      - name: Generate entitlements
         script: |
           set -e
-          cat > final.entitlements <<'ENTEOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>application-identifier</key>
-            <string>com.coldcoffee.sandboxscanner</string>
-            <key>com.apple.developer.team-identifier</key>
-            <string>COLDFCOFFEE</string>
-            <key>get-task-allow</key>
-            <true/>
-            <key>platform-application</key>
-            <true/>
-            <key>com.apple.private.security.no-sandbox</key>
-            <true/>
-            <key>com.apple.private.security.container-required</key>
-            <false/>
-          </dict>
-          </plist>
-          ENTEOF
+          python3 - <<'PYEOF'
+          import plistlib
+          ent = {
+              "application-identifier": "com.coldcoffee.sandboxscanner",
+              "com.apple.developer.team-identifier": "COLDFCOFFEE",
+              "get-task-allow": True,
+              "platform-application": True,
+              "com.apple.private.security.no-sandbox": True,
+              "com.apple.private.security.container-required": False,
+          }
+          with open("final.entitlements", "wb") as f:
+              plistlib.dump(ent, f, fmt=plistlib.FMT_XML)
+          print("written, keys:", len(ent))
+          PYEOF
           plutil -lint final.entitlements
           cat final.entitlements
 
-      - name: Sign with codesign (ad-hoc, same as v1)
+      - name: Sign with codesign
         script: |
           set +e
           BIN=build/Payload/SandboxScanner.app/SandboxScanner
           codesign --force --sign - --entitlements final.entitlements --timestamp=none "$BIN"
           echo "rc=$?"
-          echo "=== dump ==="
           codesign -d --entitlements :- "$BIN" 2>&1 | head -30
 
       - name: Verify
         script: |
           set +e
           BIN=build/Payload/SandboxScanner.app/SandboxScanner
-          otool -L "$BIN" | grep -i swift && echo "!! Swift" || echo "no swift OK"
-          echo
+          otool -L "$BIN" | grep -i swift && echo "HAS_SWIFT" || echo "NO_SWIFT"
           python3 - "$BIN" <<'PYEOF'
           import sys, struct
           d = open(sys.argv[1], 'rb').read()
@@ -82,7 +68,8 @@ workflows:
               cmd, sz = struct.unpack('<II', d[q:q+8])
               if cmd == 0x1D:
                   sigoff, sigsize = struct.unpack('<II', d[q+8:q+16])
-              if sz == 0: break
+              if sz == 0:
+                  break
               q += sz
           blob = d[sigoff:sigoff+sigsize]
           magic, length, count = struct.unpack('>III', blob[0:12])
@@ -92,14 +79,12 @@ workflows:
               sto, sst = struct.unpack('>II', blob[idx:idx+8])
               idx += 8
               slots[sto] = sst
-          print("SuperBlob count=%d slots=%s" % (count, sorted(hex(k) for k in slots)))
           o = slots[0]
           cdm, cdl, cdver, cdflags = struct.unpack('>IIII', blob[o:o+16])
-          print("CodeDirectory flags=0x%x (0x2=ADHOC, 0x100=LINKER_SIGNED)" % cdflags)
-          names = {0:'CodeDirectory',2:'Requirements',5:'Entitlements',6:'DER-Ents',
-                   7:'AltCD',0x1000:'Signature'}
+          print("SuperBlob count=%d" % count)
+          print("CodeDirectory flags=0x%x" % cdflags)
           for k in sorted(slots):
-              print("  slot 0x%08X %s" % (k, names.get(k,'?')))
+              print("  slot 0x%08X" % k)
           PYEOF
 
       - name: Package IPA
