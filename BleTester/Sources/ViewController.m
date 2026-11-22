@@ -222,7 +222,7 @@ static FrameDef kFrames[] = {
             [self say:@"扫描中…"];
         }
     } else if (central.state == CBManagerStateUnauthorized) {
-        [self log:@"❌ 蓝牙权限被拒绝");
+        [self log:@"❌ 蓝牙权限被拒绝"];
         [self say:@"蓝牙权限被拒绝"];
     } else if (central.state == CBManagerStatePoweredOff) {
         [self log:@"❌ 蓝牙未开启"];
@@ -413,3 +413,4 @@ didWriteValueForCharacteristic:(CBCharacteristic *)characteristic
 }
 
 @end
+
