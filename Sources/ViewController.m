@@ -882,15 +882,6 @@ static NSArray *mqttNoiseKeys(void) {
             if (m) [kept addObject:line];
         }
 
-        NSMutableArray *picked = [NSMutableArray array];
-        NSUInteger acc = 0;
-        for (NSInteger i = (NSInteger)kept.count - 1; i >= 0; i--) {
-            NSString *l = kept[i];
-            if (acc + l.length + 1 > 2350) continue;
-            [picked insertObject:l atIndex:0];
-            acc += l.length + 1;
-        }
-
         // 提取所有出现的 AES key
         NSMutableSet *keysFound = [NSMutableSet set];
         for (NSString *l in kept) {
