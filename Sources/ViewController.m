@@ -13,8 +13,8 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
 @interface ViewController ()
 @property (nonatomic, strong) UITextView *textView;
 @property (nonatomic, strong) UIButton *scanButton;
-@property (nonatomic, strong) UIButton *copyBtn;
-@property (nonatomic, strong) UIButton *saveBtn;
+@property (nonatomic, strong) UIButton *clipboardBtn;
+@property (nonatomic, strong) UIButton *dumpBtn;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) NSMutableString *buffer;
 @property (nonatomic, strong) NSLock *bufLock;
@@ -72,14 +72,14 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     [copy addTarget:self action:@selector(copyAll) forControlEvents:UIControlEventTouchUpInside];
     copy.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:copy];
-    self.copyBtn = copy;
+    self.clipboardBtn = copy;
 
     UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem];
     [save setTitle:@"保存到文件" forState:UIControlStateNormal];
     [save addTarget:self action:@selector(exportFile) forControlEvents:UIControlEventTouchUpInside];
     save.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:save];
-    self.saveBtn = save;
+    self.dumpBtn = save;
 
     NSArray *constraints = @[
         [sl.topAnchor constraintEqualToAnchor:safe.topAnchor constant:6],
@@ -585,4 +585,5 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
 }
 
 @end
+
 
