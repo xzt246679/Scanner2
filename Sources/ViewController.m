@@ -81,7 +81,7 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     [self.view addSubview:save];
     self.saveButton = save;
 
-    [NSLayoutConstraint activateConstraints:@[
+    NSArray *constraints = @[
         [sl.topAnchor constraintEqualToAnchor:safe.topAnchor constant:6],
         [sl.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:8],
         [sl.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-8],
@@ -103,8 +103,9 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
         [save.heightAnchor constraintEqualToConstant:36],
 
         [copy.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-4],
-        [save.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-4],
-    ]];
+        [save.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-4]
+    ];
+    [NSLayoutConstraint activateConstraints:constraints];
 
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithTitle:@"清空" style:UIBarButtonItemStylePlain
