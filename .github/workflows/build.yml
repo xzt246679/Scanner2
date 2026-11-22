@@ -1,0 +1,67 @@
+name: Build TrollStore IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show environment
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Build app bundle
+        run: |
+          set -e
+          APP=build/Payload/SandboxScanner.app
+          mkdir -p "$APP"
+
+          xcrun --sdk iphoneos swiftc \
+            -target arm64-apple-ios14.0 \
+            -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -O \
+            -module-name SandboxScanner \
+            -emit-executable \
+            -o "$APP/SandboxScanner" \
+            Sources/main.swift Sources/AppDelegate.swift Sources/ViewController.swift
+
+          cp Info.plist "$APP/Info.plist"
+          chmod +x "$APP/SandboxScanner"
+
+      - name: Install ldid
+        run: |
+          brew install ldid || true
+          which ldid || ls /opt/homebrew/bin/ldid /usr/local/bin/ldid
+
+      - name: Sign with entitlements
+        run: |
+          set -e
+          APP=build/Payload/SandboxScanner.app
+          LDID=$(which ldid || echo /opt/homebrew/bin/ldid)
+          "$LDID" -S SandboxScanner.entitlements "$APP/SandboxScanner"
+          echo "=== signed entitlements ==="
+          "$LDID" -e "$APP/SandboxScanner" || true
+
+      - name: Package IPA
+        run: |
+          set -e
+          cd build
+          mkdir -p Payload
+          zip -qry ../SandboxScanner.ipa Payload
+          cd ..
+          ls -la SandboxScanner.ipa
+          shasum -a 256 SandboxScanner.ipa
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SandboxScanner-ipa
+          path: SandboxScanner.ipa
+          retention-days: 30
