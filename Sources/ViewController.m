@@ -655,29 +655,66 @@ static NSArray *mqttNoiseKeys(void) {
             [o appendFormat:@"（前面还有 %lu 行未显示）\n", (unsigned long)(kept.count - picked.count)];
         }
 
-        // 统计埋点
-        NSInteger foundDev = 0, foundCar = 0, scanTimeout = 0, connResult = 0, connV1 = 0;
-        for (NSString *l in kept) {
-            if ([l rangeOfString:@"发现设备"].location != NSNotFound) foundDev++;
-            if ([l rangeOfString:@"东风blekey"].location != NSNotFound) foundCar++;
-            if ([l rangeOfString:@"扫描设备超时"].location != NSNotFound) scanTimeout++;
-            if ([l rangeOfString:@"连接设备结果"].location != NSNotFound) connResult++;
-            if ([l rangeOfString:@"connectDeviceV1"].location != NSNotFound) connV1++;
-        }
-        [o appendFormat:@"统计：发现设备 %ld 次 / 发现目标车 %ld 次 / 扫描超时 %ld 次 / 连接结果 %ld 次 / connectDeviceV1 %ld 次\n",
-            (long)foundDev, (long)foundCar, (long)scanTimeout, (long)connResult, (long)connV1];
+        // 统计埋点（严格区分：真发现 vs 声明目标）
+        NSInteger foundDev = 0;      // 发现设备 总次数
+        NSInteger foundNull = 0;     // 发现设备:(null)
+        NSInteger realHit = 0;       // ★ 真命中：发现设备:东风blekey
+        NSInteger declaredTarget = 0;// 目标设备:东风blekey（仅声明）
+        NSInteger scanTimeout = 0;
+        NSInteger connResult = 0;
+        NSInteger connOK = 0;
+        NSInteger connV1 = 0;
+        NSInteger destroyed = 0;
+        NSInteger clicked = 0;
 
-        if (foundCar > 0) {
-            [o appendString:@"★★★ 目标车已发现！\n"];
-        } else if (foundDev > 0) {
-            [o appendString:@"⚠️ 有扫描但未发现目标车（东风blekey-044289LE）\n"];
+        for (NSString *l in kept) {
+            BOOL isDiscoverLine = ([l rangeOfString:@"发现设备"].location != NSNotFound);
+            BOOL isTargetLine   = ([l rangeOfString:@"目标设备"].location != NSNotFound);
+            NSString *carName = @"东风blekey";
+
+            if (isDiscoverLine) {
+                foundDev++;
+                if ([l rangeOfString:@"(null)"].location != NSNotFound) {
+                    foundNull++;
+                }
+                // ★ 只有「发现设备」并且含车名，才算真命中
+                if ([l rangeOfString:carName].location != NSNotFound) {
+                    realHit++;
+                }
+            }
+            if (isTargetLine && [l rangeOfString:carName].location != NSNotFound) {
+                declaredTarget++;
+            }
+            if ([l rangeOfString:@"扫描设备超时"].location != NSNotFound) scanTimeout++;
+            if ([l rangeOfString:@"连接设备结果"].location != NSNotFound) {
+                connResult++;
+                if ([l rangeOfString:@"成功"].location != NSNotFound) connOK++;
+            }
+            if ([l rangeOfString:@"connectDeviceV1"].location != NSNotFound) connV1++;
+            if ([l rangeOfString:@"销毁蓝牙管理"].location != NSNotFound) destroyed++;
+            if ([l rangeOfString:@"点击了蓝牙连接按钮"].location != NSNotFound) clicked++;
         }
-        [o appendString:@"\n"];
+
+        [o appendFormat:@"发现设备 %ld 次（其中 null 名 %ld 次）\n", (long)foundDev, (long)foundNull];
+        [o appendFormat:@"★ 真命中目标车 %ld 次 / 声明目标 %ld 次\n", (long)realHit, (long)declaredTarget);
+        [o appendFormat:@"扫描超时 %ld 次 / 连接结果 %ld 次（成功 %ld）\n",
+            (long)scanTimeout, (long)connResult, (long)connOK];
+        [o appendFormat:@"点击按钮 %ld 次 / connectDeviceV1 %ld 次 / 销毁蓝牙管理 %ld 次\n\n",
+            (long)clicked, (long)connV1, (long)destroyed];
+
+        if (realHit > 0) {
+            [o appendString:@"★★★ 真命中！车端广播已被 App 识别\n\n"];
+        } else if (foundDev > 0) {
+            [o appendString:@"⚠️ 有扫描但未真命中目标车（只有 null 或别的设备）\n\n"];
+        } else {
+            [o appendString:@"❌ 没有任何「发现设备」记录\n\n"];
+        }
 
         for (NSString *l in picked) { [o appendString:l]; [o appendString:@"\n"]; }
 
         [self setContent:o];
-        [self say:[NSString stringWithFormat:@"🔑 %ld 行 · 车 %ld 次", (long)kept.count, (long)foundCar]];
+        [self say:[NSString stringWithFormat:@"🔑 %ld 行 · 真命中 %ld 次",
+                   (long)kept.count, (long)realHit]];
         self.busy = NO;
     });
 }
