@@ -696,7 +696,7 @@ static NSArray *mqttNoiseKeys(void) {
         }
 
         [o appendFormat:@"发现设备 %ld 次（其中 null 名 %ld 次）\n", (long)foundDev, (long)foundNull];
-        [o appendFormat:@"★ 真命中目标车 %ld 次 / 声明目标 %ld 次\n", (long)realHit, (long)declaredTarget);
+        [o appendFormat:@"★ 真命中目标车 %ld 次 / 声明目标 %ld 次\n", (long)realHit, (long)declaredTarget];
         [o appendFormat:@"扫描超时 %ld 次 / 连接结果 %ld 次（成功 %ld）\n",
             (long)scanTimeout, (long)connResult, (long)connOK];
         [o appendFormat:@"点击按钮 %ld 次 / connectDeviceV1 %ld 次 / 销毁蓝牙管理 %ld 次\n\n",
