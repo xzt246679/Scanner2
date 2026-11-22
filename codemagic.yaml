@@ -1,10 +1,10 @@
 workflows:
   ios-trollstore-ipa:
-    name: Build SandboxScanner IPA
+    name: Build SandboxScanner IPA (ObjC)
     instance_type: mac_mini_m2
     max_build_duration: 30
     environment:
-      xcode: latest
+      xcode: 15.4
     scripts:
       - name: Show toolchain
         script: |
@@ -12,27 +12,51 @@ workflows:
           sw_vers
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
+          echo "SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)"
 
-      - name: Compile Swift sources
+      - name: Compile Objective-C sources
         script: |
           set -e
           APP=build/Payload/SandboxScanner.app
           rm -rf build SandboxScanner.ipa
           mkdir -p "$APP"
 
-          xcrun --sdk iphoneos swiftc \
-            -target arm64-apple-ios14.0 \
-            -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
-            -O \
-            -module-name SandboxScanner \
-            -emit-executable \
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+
+          clang -arch arm64 \
+            -isysroot "$SDK" \
+            -mios-version-min=14.0 \
+            -fobjc-arc \
+            -O2 \
+            -framework UIKit \
+            -framework Foundation \
+            -framework Security \
             -o "$APP/SandboxScanner" \
-            Sources/main.swift Sources/AppDelegate.swift Sources/ViewController.swift
+            Sources/main.m \
+            Sources/AppDelegate.m \
+            Sources/ViewController.m
 
           cp Info.plist "$APP/Info.plist"
           chmod +x "$APP/SandboxScanner"
-          echo "=== compiled ==="
+          echo "=== binary info ==="
           ls -la "$APP"
+          file "$APP/SandboxScanner"
+
+      - name: Verify no Swift dependency
+        script: |
+          set -e
+          BIN=build/Payload/SandboxScanner.app/SandboxScanner
+          echo "=== 依赖检查 ==="
+          otool -L "$BIN"
+          echo
+          if otool -L "$BIN" | grep -i swift; then
+            echo "!!! 仍然依赖 Swift 运行时"
+            exit 1
+          fi
+          echo "✅ 无 Swift 依赖"
+          echo
+          echo "=== 最低版本 / SDK ==="
+          vtool -show-build "$BIN"
 
       - name: Write full entitlements
         script: |
@@ -56,11 +80,7 @@ workflows:
             <false/>
             <key>com.apple.private.security.storage.AppDataContainers</key>
             <true/>
-            <key>com.apple.private.security.storage.MobileDocuments</key>
-            <true/>
             <key>com.apple.private.skip-library-validation</key>
-            <true/>
-            <key>com.apple.private.security.clear-library-validation</key>
             <true/>
             <key>keychain-access-groups</key>
             <array>
@@ -72,7 +92,6 @@ workflows:
               <string>/</string>
               <string>/var/</string>
               <string>/private/</string>
-              <string>/private/var/</string>
             </array>
             <key>com.apple.security.exception.files.absolute-path.read-write</key>
             <array>
@@ -82,29 +101,22 @@ workflows:
           </dict>
           </plist>
           ENTEOF
-          echo "=== final.entitlements ==="
-          cat final.entitlements
-          echo "=== plist lint ==="
           plutil -lint final.entitlements
 
-      - name: Sign with codesign
+      - name: Sign
         script: |
           set +e
           APP=build/Payload/SandboxScanner.app
           BIN="$APP/SandboxScanner"
-          codesign --force --sign - --entitlements final.entitlements --timestamp=none "$BIN" 2>&1
-          echo "codesign rc=$?"
-          echo "=== readback ==="
-          codesign -d --entitlements :- "$BIN" 2>&1 | head -60
+          codesign --force --sign - --entitlements final.entitlements --timestamp=none "$BIN"
+          echo "rc=$?"
+          codesign -d --entitlements :- "$BIN" 2>&1 | head -50
 
       - name: Verify entitlements
         script: |
           set +e
-          APP=build/Payload/SandboxScanner.app
-          BIN="$APP/SandboxScanner"
+          BIN=build/Payload/SandboxScanner.app/SandboxScanner
           OUT=$(codesign -d --entitlements :- "$BIN" 2>/dev/null)
-          echo "$OUT"
-          echo "---- checks ----"
           echo "$OUT" | grep -q "no-sandbox" && echo "PASS_no_sandbox" || echo "FAIL_no_sandbox"
           echo "$OUT" | grep -q "platform-application" && echo "PASS_platform" || echo "FAIL_platform"
           echo "$OUT" | grep -q "AppDataContainers" && echo "PASS_appdata" || echo "FAIL_appdata"
