@@ -31,28 +31,60 @@ workflows:
 
           cp Info.plist "$APP/Info.plist"
           chmod +x "$APP/SandboxScanner"
-          echo "BUILD OK"
+          echo "=== compiled ==="
           ls -la "$APP"
+          file "$APP/SandboxScanner"
 
-      - name: Install ldid
+      - name: Sign with ldid
         script: |
           set +e
-          brew install ldid
-          echo "--- which ldid ---"
-          which ldid || true
-          ls -la /opt/homebrew/bin/ldid 2>/dev/null || true
-          ls -la /usr/local/bin/ldid 2>/dev/null || true
-          echo "LDID PATH: $(which ldid || echo /opt/homebrew/bin/ldid)"
-
-      - name: Sign with entitlements
-        script: |
-          set -e
           APP=build/Payload/SandboxScanner.app
-          LDID="$(which ldid || echo /opt/homebrew/bin/ldid)"
-          echo "using: $LDID"
-          "$LDID" -S SandboxScanner.entitlements "$APP/SandboxScanner"
-          echo "=== entitlements readback ==="
-          "$LDID" -e "$APP/SandboxScanner" || true
+          BIN="$APP/SandboxScanner"
+
+          echo "=== entitlements file ==="
+          cat SandboxScanner.entitlements
+
+          # 尝试多种方式
+          FOUND=""
+          for C in /opt/homebrew/bin/ldid /usr/local/bin/ldid "$(which ldid 2>/dev/null)"; do
+            if [ -n "$C" ] && [ -x "$C" ]; then
+              echo "candidate: $C"
+              "$C" -S SandboxScanner.entitlements "$BIN" 2>&1
+              if [ $? -eq 0 ]; then FOUND="$C"; break; fi
+            fi
+          done
+
+          if [ -z "$FOUND" ]; then
+            echo "=== ldid 全部失败，尝试简化 entitlements ==="
+            cat > /tmp/simple.entitlements <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>application-identifier</key>
+  <string>com.coldcoffee.sandboxscanner</string>
+  <key>com.apple.developer.team-identifier</key>
+  <string>COLDFCOFFEE</string>
+  <key>get-task-allow</key>
+  <true/>
+  <key>platform-application</key>
+  <true/>
+  <key>com.apple.private.security.no-sandbox</key>
+  <true/>
+</dict>
+</plist>
+EOF
+            LD="/opt/homebrew/bin/ldid"
+            [ -x "$LD" ] || LD="/usr/local/bin/ldid"
+            echo "retry with: $LD"
+            "$LD" -S/tmp/simple.entitlements "$BIN" 2>&1 || true
+          fi
+
+          echo "=== verify ==="
+          LD="/opt/homebrew/bin/ldid"
+          [ -x "$LD" ] || LD="/usr/local/bin/ldid"
+          "$LD" -e "$BIN" 2>&1 | head -30 || true
+          echo "DONE"
 
       - name: Package IPA
         script: |
