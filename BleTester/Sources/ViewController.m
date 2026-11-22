@@ -31,6 +31,10 @@ static FrameDef kFrames[] = {
 @property (nonatomic, strong) CBCharacteristic *notifyChar;
 @property (nonatomic, strong) CBCharacteristic *writeChar;
 @property (nonatomic, strong) CBService *ff00Service;
+@property (nonatomic, strong) CBService *svc1100;
+@property (nonatomic, strong) CBCharacteristic *ch1101;
+@property (nonatomic, strong) CBCharacteristic *ch1102;
+@property (nonatomic, strong) CBCharacteristic *ch1103;
 @property (nonatomic, strong) UITextView *textView;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIScrollView *scroll;
@@ -213,6 +217,10 @@ static FrameDef kFrames[] = {
     self.notifyChar = nil;
     self.writeChar = nil;
     self.ff00Service = nil;
+    self.svc1100 = nil;
+    self.ch1101 = nil;
+    self.ch1102 = nil;
+    self.ch1103 = nil;
     self.autoFired = NO;
     self.rxCount = 0;
     self.central = [[CBCentralManager alloc] initWithDelegate:self queue:nil
@@ -288,21 +296,35 @@ didDisconnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
     if (error) { [self log:@"发现服务失败: %@", error.localizedDescription]; return; }
     for (CBService *s in peripheral.services) {
         [self log:@"  服务 %@", s.UUID.UUIDString];
-        if ([[s.UUID.UUIDString uppercaseString] containsString:@"FF00"]) {
+        NSString *us = [s.UUID.UUIDString uppercaseString];
+        if ([us containsString:@"FF00"]) {
             self.ff00Service = s;
         }
+        if ([us containsString:@"1100"]) {
+            self.svc1100 = s;
+        }
     }
-    if (self.ff00Service) {
-        [self log:@"✓ 找到 FF00，发现特征+描述符"];
-        [peripheral discoverCharacteristics:nil forService:self.ff00Service];
-    } else {
-        [self log:@"❌ 未找到 FF00"];
+    // 两个服务都发现特征
+    NSMutableArray *toDiscover = [NSMutableArray array];
+    if (self.ff00Service) [toDiscover addObject:self.ff00Service];
+    if (self.svc1100) [toDiscover addObject:self.svc1100];
+
+    if (toDiscover.count == 0) {
+        [self log:@"❌ 未找到 FF00 或 1100"];
+        return;
+    }
+    for (CBService *s in toDiscover) {
+        [self log:@"✓ 发现 %@ 的特征", [s.UUID.UUIDString substringToIndex:4]];
+        [peripheral discoverCharacteristics:nil forService:s];
     }
 }
 
 - (void)peripheral:(CBPeripheral *)peripheral
 didDiscoverCharacteristicsForService:(CBService *)service error:(NSError *)error {
     if (error) { [self log:@"发现特征失败: %@", error.localizedDescription]; return; }
+
+    NSString *svcTag = [service.UUID.UUIDString substringToIndex:MIN((NSUInteger)8, service.UUID.UUIDString.length)];
+    [self log:@"--- 服务 %@ 的特征 ---", svcTag];
 
     for (CBCharacteristic *c in service.characteristics) {
         NSMutableString *props = [NSMutableString string];
@@ -311,10 +333,11 @@ didDiscoverCharacteristicsForService:(CBService *)service error:(NSError *)error
         if (c.properties & CBCharacteristicPropertyWriteWithoutResponse) [props appendString:@"WRITE_NR "];
         if (c.properties & CBCharacteristicPropertyNotify) [props appendString:@"NOTIFY "];
         if (c.properties & CBCharacteristicPropertyIndicate) [props appendString:@"INDICATE "];
-        [self log:@"  特征 %@ [%@] desc=%lu",
-            c.UUID.UUIDString, props, (unsigned long)c.descriptors.count];
+        [self log:@"    %@ [%@]", c.UUID.UUIDString, props];
 
         NSString *us = [c.UUID.UUIDString uppercaseString];
+
+        // FF00 服务
         if ([us containsString:@"FF01"]) {
             self.notifyChar = c;
             [peripheral discoverDescriptorsForCharacteristic:c];
@@ -322,13 +345,44 @@ didDiscoverCharacteristicsForService:(CBService *)service error:(NSError *)error
             self.writeChar = c;
             [peripheral discoverDescriptorsForCharacteristic:c];
         }
+        // 1100 服务（关键：可能有真正的收发通道）
+        else if ([us containsString:@"1101"]) {
+            self.ch1101 = c;
+            [self log:@"      ★ 记录 1101 (WRITE)"];
+            [peripheral discoverDescriptorsForCharacteristic:c];
+        } else if ([us containsString:@"1102"]) {
+            self.ch1102 = c;
+            [self log:@"      ★ 记录 1102 (READ+NOTIFY)  ← 可能是真正的接收通道"];
+            [peripheral discoverDescriptorsForCharacteristic:c];
+            // 立刻订阅 1102 的通知
+            if (c.properties & CBCharacteristicPropertyNotify) {
+                [self log:@"      → 订阅 1102 通知"];
+                [peripheral setNotifyValue:YES forCharacteristic:c];
+            }
+            // 如果支持 READ，立刻读
+            if (c.properties & CBCharacteristicPropertyRead) {
+                [self log:@"      → 读 1102 当前值"];
+                [peripheral readValueForCharacteristic:c];
+            }
+        } else if ([us containsString:@"1103"]) {
+            self.ch1103 = c;
+            [self log:@"      ★ 记录 1103 (READ+WRITE_NR+NOTIFY)"];
+            [peripheral discoverDescriptorsForCharacteristic:c];
+            if (c.properties & CBCharacteristicPropertyNotify) {
+                [self log:@"      → 订阅 1103 通知"];
+                [peripheral setNotifyValue:YES forCharacteristic:c];
+            }
+            if (c.properties & CBCharacteristicPropertyRead) {
+                [self log:@"      → 读 1103 当前值"];
+                [peripheral readValueForCharacteristic:c];
+            }
+        }
     }
 
     // 订阅 FF01
-    if (self.notifyChar) {
+    if (self.notifyChar && !self.autoFired) {
         [self log:@"→ 调用 setNotifyValue:YES (FF01)"];
         [peripheral setNotifyValue:YES forCharacteristic:self.notifyChar];
-        [self log:@"   等待 didUpdateNotificationState 回调…"];
     }
     [self say:@"等待通知确认…"];
 }
@@ -470,12 +524,17 @@ didWriteValueForCharacteristic:(CBCharacteristic *)characteristic
                  noResp:YES];
     });
 
-    // 1.2 秒后发第二条握手
+    // 1.2 秒后：把同样的握手帧发到 1101 和 1103
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        [self log:@"[自动] 第 2 步：发握手帧 21:19:32 (WRITE_NR)"];
-        [self rawSend:@"50231001507DF61D10458F9C8C0E201716EC888695A2D4D0BAC33F47A8972134F0B40F93"
-                 noResp:YES];
+        if (self.ch1101) {
+            [self log:@"[自动] 第 2a 步：握手帧 → 1101 (WRITE_NR)"];
+            [self sendTo:self.ch1101 hex:@"50231001507DF61D10458F9C8C0E201716EC888695A2D4D0BAC33F47A8972134F0B40F93" noResp:YES];
+        }
+        if (self.ch1103) {
+            [self log:@"[自动] 第 2b 步：握手帧 → 1103 (WRITE_NR)"];
+            [self sendTo:self.ch1103 hex:@"50231001507DF61D10458F9C8C0E201716EC888695A2D4D0BAC33F47A8972134F0B40F93" noResp:YES];
+        }
     });
 
     // 2.5 秒后：如果还没收到任何数据，试发开锁帧
@@ -508,6 +567,17 @@ didWriteValueForCharacteristic:(CBCharacteristic *)characteristic
             [self log:@"[自动] 已在 8 秒前断开，收到 %ld 帧", (long)self.rxCount];
         }
     });
+}
+
+- (void)sendTo:(CBCharacteristic *)ch hex:(NSString *)hex noResp:(BOOL)noResp {
+    if (!ch) { [self log:@"  目标特征为 nil，跳过"]; return; }
+    NSData *d = [self dataFromHex:hex];
+    if (!d) { [self log:@"  hex 解析失败"]; return; }
+    CBCharacteristicWriteType t = noResp
+        ? CBCharacteristicWriteWithoutResponse : CBCharacteristicWriteWithResponse;
+    [self log:@"  ⬆️→%@ %luB %@", ch.UUID.UUIDString, (unsigned long)d.length,
+        noResp ? @"WRITE_NR" : @"WRITE"];
+    [self.peripheral writeValue:d forCharacteristic:ch type:t];
 }
 
 - (void)rawSend:(NSString *)hex noResp:(BOOL)noResp {
@@ -566,4 +636,6 @@ didWriteValueForCharacteristic:(CBCharacteristic *)characteristic
 }
 
 @end
+
+
 
