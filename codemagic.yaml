@@ -1,0 +1,72 @@
+workflows:
+  ios-trollstore-ipa:
+    name: Build SandboxScanner IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      xcode: latest
+      cocoapods: default
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+    scripts:
+      - name: Show toolchain
+        script: |
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Compile Swift sources
+        script: |
+          set -e
+          APP=build/Payload/SandboxScanner.app
+          rm -rf build SandboxScanner.ipa
+          mkdir -p "$APP"
+
+          xcrun --sdk iphoneos swiftc \
+            -target arm64-apple-ios14.0 \
+            -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -O \
+            -module-name SandboxScanner \
+            -emit-executable \
+            -o "$APP/SandboxScanner" \
+            Sources/main.swift Sources/AppDelegate.swift Sources/ViewController.swift
+
+          cp Info.plist "$APP/Info.plist"
+          chmod +x "$APP/SandboxScanner"
+
+      - name: Install ldid
+        script: |
+          brew install ldid 2>/dev/null || true
+          which ldid || ls /opt/homebrew/bin/ldid || ls /usr/local/bin/ldid
+
+      - name: Sign with entitlements
+        script: |
+          set -e
+          APP=build/Payload/SandboxScanner.app
+          LDID="$(which ldid || echo /opt/homebrew/bin/ldid)"
+          "$LDID" -S SandboxScanner.entitlements "$APP/SandboxScanner"
+          echo "=== entitlements on binary ==="
+          "$LDID" -e "$APP/SandboxScanner" || true
+
+      - name: Package IPA
+        script: |
+          set -e
+          cd build
+          zip -qry ../SandboxScanner.ipa Payload
+          cd ..
+          ls -la SandboxScanner.ipa
+          shasum -a 256 SandboxScanner.ipa
+
+    artifacts:
+      - SandboxScanner.ipa
+
+    publishing:
+      email:
+        recipients: []
+        notify:
+          success: true
+          failure: true
