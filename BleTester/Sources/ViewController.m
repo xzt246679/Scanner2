@@ -37,6 +37,8 @@ static FrameDef kFrames[] = {
 @property (nonatomic, strong) NSMutableString *log;
 @property (nonatomic, assign) BOOL wantConnect;
 @property (nonatomic, assign) BOOL notifyConfirmed;
+@property (nonatomic, assign) BOOL autoFired;
+@property (nonatomic, assign) NSInteger rxCount;
 @end
 
 @implementation ViewController
@@ -211,6 +213,8 @@ static FrameDef kFrames[] = {
     self.notifyChar = nil;
     self.writeChar = nil;
     self.ff00Service = nil;
+    self.autoFired = NO;
+    self.rxCount = 0;
     self.central = [[CBCentralManager alloc] initWithDelegate:self queue:nil
                                                        options:@{CBCentralManagerOptionShowPowerAlertKey: @YES}];
     [self say:@"初始化中…"];
@@ -373,6 +377,14 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic *)characteristic
             [self log:@"→ 读 FF01 当前值"];
             [peripheral readValueForCharacteristic:self.notifyChar];
         }
+
+        // 只有第一次确认时才自动发（避免重订阅时重复触发）
+        if (!self.autoFired) {
+            self.autoFired = YES;
+            [self log:@""];
+            [self log:@"===== 开始自动握手序列 ====="];
+            [self autoHandshake];
+        }
     } else {
         [self log:@"⚠️ 通知被关闭 %@", characteristic.UUID.UUIDString];
     }
@@ -386,6 +398,7 @@ didUpdateValueForCharacteristic:(CBCharacteristic *)characteristic
         return;
     }
     NSData *d = characteristic.value;
+    self.rxCount++;
     [self log:@"⬇️⬇️ 收到 %@ %luB: %@",
         characteristic.UUID.UUIDString, (unsigned long)d.length, [self hexString:d]];
 }
@@ -445,6 +458,70 @@ didWriteValueForCharacteristic:(CBCharacteristic *)characteristic
 
 #pragma mark - 发送
 
+#pragma mark - 自动握手序列
+
+// 订阅确认后立刻自动发，抢在 9 秒超时之前
+- (void)autoHandshake {
+    // 200ms 后发第一条握手
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self log:@"[自动] 第 1 步：发握手帧 21:00:01 (WRITE_NR)"];
+        [self rawSend:@"50231001B4E2BC0155AA8DF3A5D1C4E8CC02C80BD367E6CF395AD20BDF23C04567F1666A"
+                 noResp:YES];
+    });
+
+    // 1.2 秒后发第二条握手
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self log:@"[自动] 第 2 步：发握手帧 21:19:32 (WRITE_NR)"];
+        [self rawSend:@"50231001507DF61D10458F9C8C0E201716EC888695A2D4D0BAC33F47A8972134F0B40F93"
+                 noResp:YES];
+    });
+
+    // 2.5 秒后：如果还没收到任何数据，试发开锁帧
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (self.rxCount == 0) {
+            [self log:@"[自动] 第 3 步：仍未收到数据，试发开锁帧 (WRITE_NR)"];
+            [self rawSend:@"5002240100375D198A25F42A1285468C3AC35953385514A5678492C82D9DF4DF6BA870A8DE4DC21B84E0A88E04826BDE01D311F0919782F1"
+                     noResp:YES];
+        } else {
+            [self log:@"[自动] 已收到 %ld 帧，跳过开锁测试", (long)self.rxCount];
+        }
+    });
+
+    // 4.0 秒后：报告状态
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self log:@"[自动] === 4 秒小结：收到 %ld 帧 ===", (long)self.rxCount];
+        if (self.rxCount == 0) {
+            [self log:@"[自动] 仍未收到任何数据"];
+        }
+    });
+
+    // 8.0 秒后：如果还活着，报告
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (self.peripheral.state == CBPeripheralStateConnected) {
+            [self log:@"[自动] 8 秒仍连接中（说明没被踢）收到 %ld 帧", (long)self.rxCount];
+        } else {
+            [self log:@"[自动] 已在 8 秒前断开，收到 %ld 帧", (long)self.rxCount];
+        }
+    });
+}
+
+- (void)rawSend:(NSString *)hex noResp:(BOOL)noResp {
+    if (!self.writeChar) { [self log:@"  无 FF02，跳过"]; return; }
+    NSData *d = [self dataFromHex:hex];
+    if (!d) { [self log:@"  hex 解析失败"]; return; }
+    CBCharacteristicWriteType t = noResp
+        ? CBCharacteristicWriteWithoutResponse : CBCharacteristicWriteWithResponse;
+    [self log:@"  ⬆️ %luB %@ hex=%@",
+        (unsigned long)d.length, noResp ? @"WRITE_NR" : @"WRITE",
+        [hex substringToIndex:MIN((NSUInteger)24, hex.length)]];
+    [self.peripheral writeValue:d forCharacteristic:self.writeChar type:t];
+}
+
 - (void)sendFrame:(UIButton *)btn {
     if (!self.writeChar) { [self say:@"无 FF02"]; return; }
     if (!self.notifyConfirmed) {
@@ -489,3 +566,4 @@ didWriteValueForCharacteristic:(CBCharacteristic *)characteristic
 }
 
 @end
+
