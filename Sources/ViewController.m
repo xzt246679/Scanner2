@@ -13,8 +13,8 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
 @interface ViewController ()
 @property (nonatomic, strong) UITextView *textView;
 @property (nonatomic, strong) UIButton *scanButton;
-@property (nonatomic, strong) UIButton *copyButton;
-@property (nonatomic, strong) UIButton *saveButton;
+@property (nonatomic, strong) UIButton *copyBtn;
+@property (nonatomic, strong) UIButton *saveBtn;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) NSMutableString *buffer;
 @property (nonatomic, strong) NSLock *bufLock;
@@ -72,14 +72,14 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     [copy addTarget:self action:@selector(copyAll) forControlEvents:UIControlEventTouchUpInside];
     copy.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:copy];
-    self.copyButton = copy;
+    self.copyBtn = copy;
 
     UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem];
     [save setTitle:@"保存到文件" forState:UIControlStateNormal];
     [save addTarget:self action:@selector(exportFile) forControlEvents:UIControlEventTouchUpInside];
     save.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:save];
-    self.saveButton = save;
+    self.saveBtn = save;
 
     NSArray *constraints = @[
         [sl.topAnchor constraintEqualToAnchor:safe.topAnchor constant:6],
@@ -177,7 +177,8 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
         UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已保存"
                                                                    message:msg
                                                             preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault]];
+        UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil];
+[ac addAction:okAction];
         [self presentViewController:ac animated:YES completion:nil];
     } else {
         self.statusLabel.text = [NSString stringWithFormat:@"保存失败：%@", err.localizedDescription];
@@ -584,3 +585,4 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
 }
 
 @end
+
