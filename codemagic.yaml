@@ -5,16 +5,10 @@ workflows:
     max_build_duration: 30
     environment:
       xcode: latest
-      cocoapods: default
-    triggering:
-      events:
-        - push
-      branch_patterns:
-        - pattern: main
-          include: true
     scripts:
       - name: Show toolchain
         script: |
+          set -e
           sw_vers
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
@@ -37,19 +31,27 @@ workflows:
 
           cp Info.plist "$APP/Info.plist"
           chmod +x "$APP/SandboxScanner"
+          echo "BUILD OK"
+          ls -la "$APP"
 
       - name: Install ldid
         script: |
-          brew install ldid 2>/dev/null || true
-          which ldid || ls /opt/homebrew/bin/ldid || ls /usr/local/bin/ldid
+          set +e
+          brew install ldid
+          echo "--- which ldid ---"
+          which ldid || true
+          ls -la /opt/homebrew/bin/ldid 2>/dev/null || true
+          ls -la /usr/local/bin/ldid 2>/dev/null || true
+          echo "LDID PATH: $(which ldid || echo /opt/homebrew/bin/ldid)"
 
       - name: Sign with entitlements
         script: |
           set -e
           APP=build/Payload/SandboxScanner.app
           LDID="$(which ldid || echo /opt/homebrew/bin/ldid)"
+          echo "using: $LDID"
           "$LDID" -S SandboxScanner.entitlements "$APP/SandboxScanner"
-          echo "=== entitlements on binary ==="
+          echo "=== entitlements readback ==="
           "$LDID" -e "$APP/SandboxScanner" || true
 
       - name: Package IPA
@@ -60,13 +62,7 @@ workflows:
           cd ..
           ls -la SandboxScanner.ipa
           shasum -a 256 SandboxScanner.ipa
+          echo "IPA READY"
 
     artifacts:
       - SandboxScanner.ipa
-
-    publishing:
-      email:
-        recipients: []
-        notify:
-          success: true
-          failure: true
