@@ -4,7 +4,7 @@ workflows:
     instance_type: mac_mini_m2
     max_build_duration: 30
     environment:
-      xcode: 15.4
+      xcode: latest
     scripts:
       - name: Show toolchain
         script: |
@@ -134,3 +134,4 @@ workflows:
 
     artifacts:
       - SandboxScanner.ipa
+
