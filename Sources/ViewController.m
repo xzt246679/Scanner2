@@ -530,8 +530,12 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
             NSInteger i = 0;
             for (NSDictionary *it in arr) {
                 if (i++ >= 30) break;
-                [self log:@"   svc=%@ acct=%@", it[(__bridge id)kSecAttrService] ?: @"-",
-                       [it[(__bridge id)kSecAttrAccount] description] ?: @"-"];
+                id svcObj = it[(__bridge id)kSecAttrService];
+                id acctObj = it[(__bridge id)kSecAttrAccount];
+                NSString *svc = [svcObj isKindOfClass:[NSString class]] ? svcObj : @"-";
+                NSString *acct = [acctObj isKindOfClass:[NSString class]] ? acctObj : [acctObj description];
+                if (!acct) acct = @"-";
+                [self log:@"   svc=%@ acct=%@", svc, acct];
             }
         } else if (r) {
             CFRelease(r);
