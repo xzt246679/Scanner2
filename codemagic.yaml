@@ -12,25 +12,9 @@ workflows:
           sw_vers
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
-          echo "=== ldid 来源 ==="
-          brew --prefix 2>/dev/null || true
-          ls -la /opt/homebrew/bin/ldid 2>/dev/null || echo "homebrew ldid 不存在"
-
-      - name: Install ldid from source
-        script: |
-          set -e
-          echo "=== 用 git clone 编译 ldid（避开 brew 版本 bug）==="
-          cd "$CM_BUILD_DIR"
-          rm -rf ldid-src
-          git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ldid-src
-          cd ldid-src
-          git submodule update --init --recursive 2>/dev/null || true
-          make -j4
-          ls -la ./ldid
-          cp ./ldid "$CM_BUILD_DIR/ldid-custom"
-          chmod +x "$CM_BUILD_DIR/ldid-custom"
-          echo "=== 自定义 ldid 版本 ==="
-          "$CM_BUILD_DIR/ldid-custom" -h 2>&1 | head -5 || true
+          echo "--- ldid ---"
+          ls -la /opt/homebrew/bin/ldid 2>/dev/null || echo "none"
+          which codesign
 
       - name: Compile Swift sources
         script: |
@@ -52,78 +36,88 @@ workflows:
           chmod +x "$APP/SandboxScanner"
           echo "=== compiled ==="
           ls -la "$APP"
+          file "$APP/SandboxScanner"
 
-      - name: Prepare entitlements
+      - name: Write minimal entitlements
         script: |
           set -e
-          python3 - <<'PYEOF'
-          import plistlib
-
-          ent = {
-              "application-identifier": "com.coldcoffee.sandboxscanner",
-              "com.apple.developer.team-identifier": "COLDFCOFFEE",
-              "get-task-allow": True,
-              "platform-application": True,
-              "com.apple.private.security.no-sandbox": True,
-              "com.apple.private.security.container-required": False,
-              "com.apple.private.security.storage.AppDataContainers": True,
-              "com.apple.private.skip-library-validation": True,
-              "keychain-access-groups": ["com.coldcoffee.sandboxscanner"],
-          }
-          with open("final.entitlements", "wb") as f:
-              plistlib.dump(ent, f, fmt=plistlib.FMT_XML)
-          print("written final.entitlements")
-          PYEOF
+          cat > final.entitlements <<'ENTEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>application-identifier</key>
+            <string>com.coldcoffee.sandboxscanner</string>
+            <key>com.apple.developer.team-identifier</key>
+            <string>COLDFCOFFEE</string>
+            <key>get-task-allow</key>
+            <true/>
+            <key>platform-application</key>
+            <true/>
+            <key>com.apple.private.security.no-sandbox</key>
+            <true/>
+            <key>com.apple.private.security.container-required</key>
+            <false/>
+          </dict>
+          </plist>
+          ENTEOF
+          echo "=== final.entitlements ==="
           cat final.entitlements
+          echo "=== plist 语法校验 ==="
+          plutil -lint final.entitlements
 
-      - name: Sign with custom ldid
+      - name: Sign with codesign (ad-hoc + entitlements)
         script: |
           set +e
           APP=build/Payload/SandboxScanner.app
           BIN="$APP/SandboxScanner"
-          LDID="$CM_BUILD_DIR/ldid-custom"
 
-          echo "=== signing with: $LDID ==="
-          "$LDID" -Sfinal.entitlements "$BIN"
-          RC=$?
-          echo "exit code: $RC"
+          echo "=== codesign ad-hoc with entitlements ==="
+          codesign --force --sign - --entitlements final.entitlements --timestamp=none "$BIN" 2>&1
+          echo "codesign rc=$?"
 
-          if [ $RC -ne 0 ]; then
-            echo "!!! 签名失败，尝试 brew ldid !!!"
-            if [ -x /opt/homebrew/bin/ldid ]; then
-              /opt/homebrew/bin/ldid -Sfinal.entitlements "$BIN"
-              echo "brew ldid exit: $?"
-            fi
-          fi
-
-          echo "=== 读回 entitlements（关键验证）==="
-          "$LDID" -e "$BIN" 2>&1 | head -60
-
-          echo "=== codesign 信息 ==="
+          echo "=== codesign verify ==="
           codesign -dv --entitlements :- "$BIN" 2>&1 | head -40
 
-      - name: Verify entitlements contains no-sandbox
+      - name: Sign with ldid (fallback)
         script: |
-          set -e
+          set +e
           APP=build/Payload/SandboxScanner.app
           BIN="$APP/SandboxScanner"
-          LDID="$CM_BUILD_DIR/ldid-custom"
 
-          OUT=$("$LDID" -e "$BIN" 2>&1 || true)
-          echo "$OUT"
+          LDID=""
+          for C in /opt/homebrew/bin/ldid /usr/local/bin/ldid; do
+            if [ -x "$C" ]; then LDID="$C"; break; fi
+          done
 
-          if echo "$OUT" | grep -q "no-sandbox"; then
-            echo "✅ entitlements 包含 no-sandbox"
-          else
-            echo "❌ entitlements 缺少 no-sandbox —— 装机后不会有权限"
-            echo "继续打包，但需要换方案"
+          if [ -z "$LDID" ]; then
+            echo "no ldid, skip"
+            exit 0
           fi
 
-          if echo "$OUT" | grep -q "platform-application"; then
-            echo "✅ entitlements 包含 platform-application"
-          else
-            echo "❌ entitlements 缺少 platform-application"
-          fi
+          echo "=== ldid: $LDID ==="
+          echo "--- readback before ---"
+          "$LDID" -e "$BIN" 2>&1 | head -20
+
+          echo "--- try ldid -S ---"
+          "$LDID" -Sfinal.entitlements "$BIN" 2>&1
+          echo "rc=$?"
+
+          echo "--- readback after ---"
+          "$LDID" -e "$BIN" 2>&1 | head -30
+
+      - name: Verify entitlements present
+        script: |
+          set +e
+          APP=build/Payload/SandboxScanner.app
+          BIN="$APP/SandboxScanner"
+
+          echo "=== 最终检查 ==="
+          OUT=$(codesign -d --entitlements :- "$BIN" 2>/dev/null)
+          echo "$OUT" | head -40
+          echo "---- 关键字 ----"
+          echo "$OUT" | grep -q "no-sandbox" && echo "PASS_no_sandbox" || echo "FAIL_no_sandbox"
+          echo "$OUT" | grep -q "platform-application" && echo "PASS_platform" || echo "FAIL_platform"
 
       - name: Package IPA
         script: |
