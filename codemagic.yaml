@@ -35,56 +35,87 @@ workflows:
           ls -la "$APP"
           file "$APP/SandboxScanner"
 
+      - name: Normalize entitlements
+        script: |
+          set -e
+          python3 - <<'PYEOF'
+          import plistlib, sys
+
+          src = "SandboxScanner.entitlements"
+          dst = "simple.entitlements"
+
+          with open(src, "rb") as f:
+              d = plistlib.load(f)
+
+          # 只保留 ldid 能正常处理的安全 key
+          keep = {}
+          for k in [
+              "application-identifier",
+              "com.apple.developer.team-identifier",
+              "get-task-allow",
+              "platform-application",
+              "com.apple.private.security.no-sandbox",
+              "com.apple.private.security.container-required",
+              "com.apple.private.security.storage.AppDataContainers",
+              "keychain-access-groups",
+          ]:
+              if k in d:
+                  keep[k] = d[k]
+
+          with open(dst, "wb") as f:
+              plistlib.dump(keep, f, fmt=plistlib.FMT_XML)
+
+          print("=== normalized entitlements keys ===")
+          for k in keep:
+              print("  ", k)
+          PYEOF
+          echo "--- file ---"
+          cat simple.entitlements
+
       - name: Sign with ldid
         script: |
           set +e
           APP=build/Payload/SandboxScanner.app
           BIN="$APP/SandboxScanner"
 
-          echo "=== entitlements file ==="
-          cat SandboxScanner.entitlements
-
-          # 尝试多种方式
-          FOUND=""
-          for C in /opt/homebrew/bin/ldid /usr/local/bin/ldid "$(which ldid 2>/dev/null)"; do
-            if [ -n "$C" ] && [ -x "$C" ]; then
-              echo "candidate: $C"
-              "$C" -S SandboxScanner.entitlements "$BIN" 2>&1
-              if [ $? -eq 0 ]; then FOUND="$C"; break; fi
-            fi
+          LDID=""
+          for C in /opt/homebrew/bin/ldid /usr/local/bin/ldid; do
+            if [ -x "$C" ]; then LDID="$C"; break; fi
           done
+          echo "ldid = $LDID"
 
-          if [ -z "$FOUND" ]; then
-            echo "=== ldid 全部失败，尝试简化 entitlements ==="
-            cat > /tmp/simple.entitlements <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>application-identifier</key>
-  <string>com.coldcoffee.sandboxscanner</string>
-  <key>com.apple.developer.team-identifier</key>
-  <string>COLDFCOFFEE</string>
-  <key>get-task-allow</key>
-  <true/>
-  <key>platform-application</key>
-  <true/>
-  <key>com.apple.private.security.no-sandbox</key>
-  <true/>
-</dict>
-</plist>
-EOF
-            LD="/opt/homebrew/bin/ldid"
-            [ -x "$LD" ] || LD="/usr/local/bin/ldid"
-            echo "retry with: $LD"
-            "$LD" -S/tmp/simple.entitlements "$BIN" 2>&1 || true
+          if [ -z "$LDID" ]; then
+            echo "ldid 不存在，跳过签名（TrollStore 安装时不校验签名）"
+            exit 0
           fi
 
-          echo "=== verify ==="
-          LD="/opt/homebrew/bin/ldid"
-          [ -x "$LD" ] || LD="/usr/local/bin/ldid"
-          "$LD" -e "$BIN" 2>&1 | head -30 || true
-          echo "DONE"
+          echo "=== attempt 1: simple.entitlements ==="
+          "$LDID" -Ssimple.entitlements "$BIN" && echo "OK1" && exit 0
+
+          echo "=== attempt 2: minimal inline ==="
+          printf '%s' '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>platform-application</key><true/><key>com.apple.private.security.no-sandbox</key><true/><key>get-task-allow</key><true/></dict></plist>' > minimal.entitlements
+          "$LDID" -Sminimal.entitlements "$BIN" && echo "OK2" && exit 0
+
+          echo "=== attempt 3: 无 entitlements 签名 ==="
+          "$LDID" -S "$BIN" && echo "OK3" && exit 0
+
+          echo "全部签名方式失败，继续打包（TrollStore 仍可安装）"
+          exit 0
+
+      - name: Verify entitlements
+        script: |
+          set +e
+          APP=build/Payload/SandboxScanner.app
+          BIN="$APP/SandboxScanner"
+          LDID=""
+          for C in /opt/homebrew/bin/ldid /usr/local/bin/ldid; do
+            if [ -x "$C" ]; then LDID="$C"; break; fi
+          done
+          echo "=== entitlements readback ==="
+          [ -n "$LDID" ] && "$LDID" -e "$BIN" 2>&1 | head -40
+          echo "=== codesign info ==="
+          codesign -dv "$BIN" 2>&1 | head -20
+          echo DONE
 
       - name: Package IPA
         script: |
