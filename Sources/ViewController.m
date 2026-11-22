@@ -268,11 +268,47 @@ static NSArray *noiseKeys(void) {
     return a;
 }
 
+// MQTT / 远程控制噪声（专用于 BLE 分析时排除）
+static NSArray *mqttNoiseKeys(void) {
+    static NSArray *a = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        a = @[
+            @"MQTT", @"Mqtt", @"mqtt",
+            @"connectWithHandler",
+            @"remote code unsupport",
+            @"CMD_DOOR", @"CMD_TRUNK", @"CMD_DRS",
+            @"remoteCode", @"pushBody", @"controlResult",
+            @"NewCarViewController",
+            @"saveRelation", @"saveByVin", @"msotasvr",
+            @"POST请求:", @"POST返回:", @"statusCode",
+            @"获取到的慢充枪", @"开始拼接刷新数据",
+            @"预约状态字段值"
+        ];
+    });
+    return a;
+}
+
 - (BOOL)isNoise:(NSString *)line {
     for (NSString *k in noiseKeys()) {
         if ([line rangeOfString:k].location != NSNotFound) return YES;
     }
     return NO;
+}
+
+- (BOOL)isMqttNoise:(NSString *)line {
+    for (NSString *k in mqttNoiseKeys()) {
+        if ([line rangeOfString:k].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+// 🔑 专用过滤：只保留含 🔑 的行，且排除 MQTT 噪声
+- (BOOL)isKeyLine:(NSString *)line {
+    if ([line rangeOfString:@"🔑"].location == NSNotFound &&
+        [line rangeOfString:@"🔐"].location == NSNotFound) return NO;
+    if ([self isMqttNoise:line]) return NO;
+    return YES;
 }
 
 // 取主日志文本（最大的那个）
@@ -366,14 +402,61 @@ static NSArray *noiseKeys(void) {
     });
 }
 
-// ② BLE 连接过程
+// ② BLE 连接过程（排除 MQTT）
 - (void)btnBleConnect {
-    [self runSlice:@[@"Connect", @"connect", @"disconnect",
-                     @"didConnect", @"didDisconnect",
-                     @"peripheral", @"Peripheral", @"central", @"Central",
-                     @"startScan", @"stopScan", @"didDiscover",
-                     @"stateMachine", @"peripheralManager"]
-           scan:20000 max:2400 title:@"② BLE 连接过程"];
+    if (self.busy) return;
+    self.busy = YES;
+    [self say:@"抓 BLE 连接…"];
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSString *t = [self mainLogText];
+        if (!t) { [self setContent:@"无主日志"]; self.busy = NO; return; }
+
+        NSArray *lines = [t componentsSeparatedByString:@"\n"];
+        NSUInteger total = lines.count;
+        NSUInteger start = (total > 40000) ? total - 40000 : 0;
+
+        NSArray *keys = @[@"Connect", @"connect", @"disconnect", @"Disconnect",
+                          @"didConnect", @"didDisconnect", @"didFailToConnect",
+                          @"peripheral", @"Peripheral", @"central", @"Central",
+                          @"startScan", @"stopScan", @"didDiscover", @"discover",
+                          @"stateMachine", @"CBPeripheral", @"CBCentral",
+                          @"scanForPeripherals", @"连接设备结果", @"扫描设备超时",
+                          @"发现设备", @"connectDeviceV1", @"monitorConnectStatus"];
+        NSMutableArray *kept = [NSMutableArray array];
+        for (NSUInteger i = start; i < total; i++) {
+            NSString *line = lines[i];
+            if (line.length < 6) continue;
+            if ([self isNoise:line]) continue;
+            if ([self isMqttNoise:line]) continue;   // 排除 MQTT
+            BOOL m = NO;
+            for (NSString *k in keys) {
+                if ([line rangeOfString:k].location != NSNotFound) { m = YES; break; }
+            }
+            if (m) [kept addObject:line];
+        }
+
+        NSMutableArray *picked = [NSMutableArray array];
+        NSUInteger acc = 0;
+        for (NSInteger i = (NSInteger)kept.count - 1; i >= 0; i--) {
+            NSString *l = kept[i];
+            if (acc + l.length + 1 > 2350) break;
+            [picked insertObject:l atIndex:0];
+            acc += l.length + 1;
+        }
+
+        NSMutableString *o = [NSMutableString string];
+        [o appendFormat:@"② BLE 连接（已排除 MQTT）\n命中 %lu 行，输出 %lu 行\n",
+            (unsigned long)kept.count, (unsigned long)picked.count];
+        if (kept.count > picked.count) {
+            [o appendFormat:@"（前面还有 %lu 行未显示）\n", (unsigned long)(kept.count - picked.count)];
+        }
+        [o appendString:@"\n"];
+        for (NSString *l in picked) { [o appendString:l]; [o appendString:@"\n"]; }
+
+        [self setContent:o];
+        [self say:[NSString stringWithFormat:@"BLE %ld 行", (long)kept.count]];
+        self.busy = NO;
+    });
 }
 
 // ③ UUID / 服务 / 特征
@@ -532,43 +615,69 @@ static NSArray *noiseKeys(void) {
     });
 }
 
-// ⑮ 时间线（最近 80 行原始日志，仅滤噪）
+// ⑮ 蓝牙时间线（只抓 🔑 行，排除 MQTT/远程控制噪声）
 - (void)btnTimeline {
     if (self.busy) return;
     self.busy = YES;
-    [self say:@"抓时间线…"];
+    [self say:@"抓蓝牙时间线…"];
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         NSString *t = [self mainLogText];
-        if (!t) { [self setContent:@"无主日志"]; self.busy = NO; return; }
+        if (!t) { [self setContent:@"无主日志"]; [self say:@"无日志"]; self.busy = NO; return; }
 
         NSArray *lines = [t componentsSeparatedByString:@"\n"];
         NSUInteger total = lines.count;
-        NSUInteger start = (total > 200) ? total - 200 : 0;
+        // 扫全部行（不用只扫尾部，因为蓝牙事件可能在任何位置）
+        NSUInteger start = 0;
+        if (total > 40000) start = total - 40000;
 
         NSMutableArray *kept = [NSMutableArray array];
         for (NSUInteger i = start; i < total; i++) {
             NSString *line = lines[i];
             if (line.length < 6) continue;
-            if ([self isNoise:line]) continue;
+            if (![self isKeyLine:line]) continue;
             [kept addObject:line];
         }
 
+        // 从尾部往前累加到 2400
         NSMutableArray *picked = [NSMutableArray array];
         NSUInteger acc = 0;
         for (NSInteger i = (NSInteger)kept.count - 1; i >= 0; i--) {
             NSString *line = kept[i];
-            if (acc + line.length + 1 > 2400) break;
+            if (acc + line.length + 1 > 2350) break;
             [picked insertObject:line atIndex:0];
             acc += line.length + 1;
         }
 
         NSMutableString *o = [NSMutableString string];
-        [o appendFormat:@"⑮ 时间线（尾部 200 行滤噪，输出 %lu 行）\n\n",
-            (unsigned long)picked.count];
+        [o appendFormat:@"⑮ 蓝牙时间线（只抓 🔑 行）\n扫描 %lu 行，命中 %lu 行，输出 %lu 行\n",
+            (unsigned long)(total - start), (unsigned long)kept.count, (unsigned long)picked.count];
+        if (kept.count > picked.count) {
+            [o appendFormat:@"（前面还有 %lu 行未显示）\n", (unsigned long)(kept.count - picked.count)];
+        }
+
+        // 统计埋点
+        NSInteger foundDev = 0, foundCar = 0, scanTimeout = 0, connResult = 0, connV1 = 0;
+        for (NSString *l in kept) {
+            if ([l rangeOfString:@"发现设备"].location != NSNotFound) foundDev++;
+            if ([l rangeOfString:@"东风blekey"].location != NSNotFound) foundCar++;
+            if ([l rangeOfString:@"扫描设备超时"].location != NSNotFound) scanTimeout++;
+            if ([l rangeOfString:@"连接设备结果"].location != NSNotFound) connResult++;
+            if ([l rangeOfString:@"connectDeviceV1"].location != NSNotFound) connV1++;
+        }
+        [o appendFormat:@"统计：发现设备 %ld 次 / 发现目标车 %ld 次 / 扫描超时 %ld 次 / 连接结果 %ld 次 / connectDeviceV1 %ld 次\n",
+            (long)foundDev, (long)foundCar, (long)scanTimeout, (long)connResult, (long)connV1];
+
+        if (foundCar > 0) {
+            [o appendString:@"★★★ 目标车已发现！\n"];
+        } else if (foundDev > 0) {
+            [o appendString:@"⚠️ 有扫描但未发现目标车（东风blekey-044289LE）\n"];
+        }
+        [o appendString:@"\n"];
+
         for (NSString *l in picked) { [o appendString:l]; [o appendString:@"\n"]; }
 
         [self setContent:o];
-        [self say:[NSString stringWithFormat:@"时间线 %lu 字符", (unsigned long)o.length]];
+        [self say:[NSString stringWithFormat:@"🔑 %ld 行 · 车 %ld 次", (long)kept.count, (long)foundCar]];
         self.busy = NO;
     });
 }
