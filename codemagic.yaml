@@ -1,4 +1,76 @@
 workflows:
+  ios-bletester:
+    name: Build BleTester IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      xcode: latest
+    scripts:
+      - name: Compile
+        script: |
+          set +e
+          APP=build/Payload/BleTester.app
+          rm -rf build BleTester.ipa compile-bt.log
+          mkdir -p "$APP"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+
+          clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
+            -fobjc-arc -O2 -Wall \
+            -framework UIKit -framework Foundation -framework CoreBluetooth \
+            -o "$APP/BleTester" \
+            BleTester/Sources/main.m BleTester/Sources/ViewController.m \
+            2>&1 | tee compile-bt.log
+
+          RC=${PIPESTATUS[0]}
+          echo "=== clang rc=$RC ==="
+          if [ "$RC" -ne 0 ]; then
+            echo "===== ERRORS ====="
+            grep -E "error:" compile-bt.log | head -30
+            exit 1
+          fi
+
+          cp BleTester/Info.plist "$APP/Info.plist"
+          chmod +x "$APP/BleTester"
+          echo "编译成功"
+          ls -la "$APP"
+
+      - name: Entitlements
+        script: |
+          set -e
+          python3 - <<'PYEOF'
+          import plistlib
+          ent = {
+              "application-identifier": "com.coldcoffee.bletester",
+              "com.apple.developer.team-identifier": "COLDFCOFFEE",
+              "get-task-allow": True,
+              "platform-application": True,
+              "com.apple.private.security.no-sandbox": True,
+              "com.apple.private.security.container-required": False,
+          }
+          with open("bt.entitlements", "wb") as f:
+              plistlib.dump(ent, f, fmt=plistlib.FMT_XML)
+          print("keys:", len(ent))
+          PYEOF
+
+      - name: Sign
+        script: |
+          set +e
+          codesign --force --sign - --entitlements bt.entitlements --timestamp=none \
+            build/Payload/BleTester.app/BleTester
+          echo "rc=$?"
+
+      - name: Package
+        script: |
+          set -e
+          cd build
+          zip -qry ../BleTester.ipa Payload
+          cd ..
+          ls -la BleTester.ipa
+
+    artifacts:
+      - BleTester.ipa
+      - compile-bt.log
+
   ios-trollstore-ipa:
     name: Build SandboxScanner IPA
     instance_type: mac_mini_m2
@@ -24,7 +96,6 @@ workflows:
 
           RC=${PIPESTATUS[0]}
           echo "=== clang rc=$RC ==="
-
           if [ "$RC" -ne 0 ]; then
             echo "===== ERRORS ====="
             grep -E "error:" compile.log | head -30
@@ -36,7 +107,6 @@ workflows:
           chmod +x "$APP/SandboxScanner"
           chmod a+r compile.log 2>/dev/null || true
           echo "编译成功"
-          ls -la "$APP"
 
       - name: Generate entitlements
         script: |
