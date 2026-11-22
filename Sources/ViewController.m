@@ -330,11 +330,12 @@ static NSArray *mqttNoiseKeys(void) {
     return [self readText:[NSString stringWithFormat:@"Documents/%@", best]];
 }
 
-// 智能切片：从尾部往前扫，最多 200 行，总长 ≤ maxChars
+// 智能切片：从尾部往前扫，逐行截断后累加，不会因某行超长而中断
 - (NSString *)sliceLog:(NSString *)text
                  keys:(NSArray *)keys
             scanLines:(NSUInteger)scanLines
               maxChars:(NSUInteger)maxChars
+            perLineMax:(NSUInteger)perLineMax
                 title:(NSString *)title {
 
     if (!text || text.length == 0) return [NSString stringWithFormat:@"%@\n(日志为空)", title];
@@ -343,7 +344,6 @@ static NSArray *mqttNoiseKeys(void) {
     NSUInteger total = lines.count;
     NSUInteger start = (total > scanLines) ? total - scanLines : 0;
 
-    // 先收集命中行
     NSMutableArray *hits = [NSMutableArray array];
     for (NSUInteger i = start; i < total; i++) {
         NSString *line = lines[i];
@@ -353,26 +353,33 @@ static NSArray *mqttNoiseKeys(void) {
         for (NSString *k in keys) {
             if ([line rangeOfString:k].location != NSNotFound) { m = YES; break; }
         }
-        if (m) [hits addObject:line];
+        if (!m) continue;
+
+        // 逐行截断，保证每行可控
+        if (line.length > perLineMax) {
+            line = [[line substringToIndex:perLineMax] stringByAppendingString:@"…"];
+        }
+        [hits addObject:line];
     }
 
     NSUInteger totalHits = hits.count;
 
-    // 从最新（尾部）往前取，直到 maxChars
+    // 从最新（尾部）往前取，放不下就继续往前找（不 break）
     NSMutableArray *picked = [NSMutableArray array];
     NSUInteger acc = 0;
     for (NSInteger i = (NSInteger)hits.count - 1; i >= 0; i--) {
         NSString *line = hits[i];
-        if (acc + line.length + 1 > maxChars) break;
+        NSUInteger need = line.length + 1;
+        if (acc + need > maxChars) continue;   // ★ 跳过而不是中断
         [picked insertObject:line atIndex:0];
-        acc += line.length + 1;
+        acc += need;
     }
 
     NSMutableString *o = [NSMutableString string];
     [o appendFormat:@"%@\n扫描 %lu 行，命中 %lu 行，输出 %lu 行\n",
         title, (unsigned long)(total - start), (unsigned long)totalHits, (unsigned long)picked.count];
     if (totalHits > picked.count) {
-        [o appendFormat:@"（前面还有 %lu 行未显示）\n", (unsigned long)(totalHits - picked.count)];
+        [o appendFormat:@"（还有 %lu 行因字符上限未显示）\n", (unsigned long)(totalHits - picked.count)];
     }
     [o appendString:@"\n"];
     for (NSString *l in picked) {
@@ -380,6 +387,16 @@ static NSArray *mqttNoiseKeys(void) {
         [o appendString:@"\n"];
     }
     return o;
+}
+
+// 兼容旧调用（默认每行 500 字符）
+- (NSString *)sliceLog:(NSString *)text
+                 keys:(NSArray *)keys
+            scanLines:(NSUInteger)scanLines
+              maxChars:(NSUInteger)maxChars
+                title:(NSString *)title {
+    return [self sliceLog:text keys:keys scanLines:scanLines
+                 maxChars:maxChars perLineMax:500 title:title];
 }
 
 #pragma mark - 按钮
@@ -445,7 +462,7 @@ static NSArray *mqttNoiseKeys(void) {
         NSUInteger acc = 0;
         for (NSInteger i = (NSInteger)kept.count - 1; i >= 0; i--) {
             NSString *l = kept[i];
-            if (acc + l.length + 1 > 2350) break;
+            if (acc + l.length + 1 > 2350) continue;
             [picked insertObject:l atIndex:0];
             acc += l.length + 1;
         }
@@ -649,7 +666,7 @@ static NSArray *mqttNoiseKeys(void) {
         NSUInteger acc = 0;
         for (NSInteger i = (NSInteger)kept.count - 1; i >= 0; i--) {
             NSString *line = kept[i];
-            if (acc + line.length + 1 > 2350) break;
+            if (acc + line.length + 1 > 2350) continue;
             [picked insertObject:line atIndex:0];
             acc += line.length + 1;
         }
@@ -741,7 +758,7 @@ static NSArray *mqttNoiseKeys(void) {
 
 #pragma mark - 新增：协议级按钮
 
-// ⑯ 原始收发（hex 数据的完整记录）
+// ⑯ 原始收发（只抓真正的 hex 帧）
 - (void)btnRawIO {
     if (self.busy) return;
     self.busy = YES;
@@ -752,85 +769,81 @@ static NSArray *mqttNoiseKeys(void) {
 
         NSArray *lines = [t componentsSeparatedByString:@"\n"];
         NSUInteger total = lines.count;
-        NSUInteger start = (total > 60000) ? total - 60000 : 0;
+        NSUInteger start = 0;
+        if (total > 60000) start = total - 60000;
 
-        // 抓所有含 hex 数据 / 收发的行
-        NSArray *keys = @[
-            @"数据接收", @"数据发送", @"发送数据", @"接收数据",
-            @"didReceiveData", @"didWriteValue", @"writeValue",
-            @"sendData", @"receivedData", @"原始数据",
-            @"hex", @"HEX", @"bytes", @"Bytes",
-            @"payload", @"Payload", @"packet", @"Packet",
-            @"SOF", @"序列号", @"序号", @"帧",
-            @"下发", @"上报", @"指令", @"命令数据"
-        ];
+        // 只保留含「数据接收」「数据发送」「发送数据」且带长 hex 的行
+        NSMutableArray *frames = [NSMutableArray array];
+        NSMutableDictionary *sofCount = [NSMutableDictionary dictionary];
 
-        NSMutableArray *kept = [NSMutableArray array];
         for (NSUInteger i = start; i < total; i++) {
             NSString *line = lines[i];
-            if (line.length < 6) continue;
+            if (line.length < 10) continue;
             if ([self isNoise:line]) continue;
             if ([self isMqttNoise:line]) continue;
-            BOOL m = NO;
-            for (NSString *k in keys) {
-                if ([line rangeOfString:k].location != NSNotFound) { m = YES; break; }
-            }
-            if (!m) continue;
-            // 必须含至少 8 位连续 hex 才保留（排除纯文字）
-            NSRange hexRange = [line rangeOfString:@"[0-9A-Fa-f]{8,}" options:NSRegularExpressionSearch];
-            if (hexRange.location == NSNotFound) {
-                // 也保留明确的收发标记行
-                if ([line rangeOfString:@"数据接收"].location == NSNotFound &&
-                    [line rangeOfString:@"数据发送"].location == NSNotFound &&
-                    [line rangeOfString:@"发送数据"].location == NSNotFound) continue;
-            }
-            [kept addObject:line];
-        }
 
-        NSMutableArray *picked = [NSMutableArray array];
-        NSUInteger acc = 0;
-        for (NSInteger i = (NSInteger)kept.count - 1; i >= 0; i--) {
-            NSString *l = kept[i];
-            if (acc + l.length + 1 > 2350) break;
-            [picked insertObject:l atIndex:0];
-            acc += l.length + 1;
-        }
+            BOOL isIOMark = ([line rangeOfString:@"数据接收"].location != NSNotFound) ||
+                            ([line rangeOfString:@"数据发送"].location != NSNotFound) ||
+                            ([line rangeOfString:@"发送数据"].location != NSNotFound) ||
+                            ([line rangeOfString:@"接收数据"].location != NSNotFound) ||
+                            ([line rangeOfString:@"原始数据"].location != NSNotFound) ||
+                            ([line rangeOfString:@"didWriteValue"].location != NSNotFound) ||
+                            ([line rangeOfString:@"didReceiveData"].location != NSNotFound);
+            if (!isIOMark) continue;
 
-        // 统计出现的 hex 帧首字节
-        NSMutableDictionary *sofCount = [NSMutableDictionary dictionary];
-        for (NSString *l in kept) {
-            NSRange r = [l rangeOfString:@"[:：]\\s*([0-9A-Fa-f]{2})([0-9A-Fa-f]{2})?"
-                                 options:NSRegularExpressionSearch];
-            if (r.location != NSNotFound && r.length >= 2) {
-                NSString *sub = [l substringWithRange:r];
-                NSString *b0 = [[sub stringByReplacingOccurrencesOfString:@"：" withString:@":"]
-                                stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@": "]];
-                if (b0.length >= 2) {
-                    b0 = [[b0 substringToIndex:2] lowercaseString];
+            // 提取行内所有 ≥16 位连续 hex
+            NSString *trimmed = line;
+            if (trimmed.length > 700) trimmed = [[trimmed substringToIndex:700] stringByAppendingString:@"…"];
+
+            NSRegularExpression *re = [NSRegularExpression
+                regularExpressionWithPattern:@"[0-9A-Fa-f]{16,}" options:0 error:NULL];
+            NSArray *ms = [re matchesInString:trimmed options:0
+                                       range:NSMakeRange(0, trimmed.length)];
+            if (ms.count == 0) continue;
+
+            [frames addObject:trimmed];
+
+            // 统计首字节（每段 hex 的前两位）
+            for (NSTextCheckingResult *m in ms) {
+                NSString *h = [trimmed substringWithRange:m.range];
+                if (h.length >= 2) {
+                    NSString *b0 = [[h substringToIndex:2] lowercaseString];
                     sofCount[b0] = @([sofCount[b0] integerValue] + 1);
                 }
             }
         }
 
+        // 取尾部 N 行放得下的
+        NSMutableArray *picked = [NSMutableArray array];
+        NSUInteger acc = 0;
+        for (NSInteger i = (NSInteger)frames.count - 1; i >= 0; i--) {
+            NSString *l = frames[i];
+            NSUInteger need = l.length + 1;
+            if (acc + need > 2200) continue;
+            [picked insertObject:l atIndex:0];
+            acc += need;
+        }
+
         NSMutableString *o = [NSMutableString string];
-        [o appendFormat:@"⑯ 原始收发（hex 数据）\n命中 %lu 行，输出 %lu 行\n",
-            (unsigned long)kept.count, (unsigned long)picked.count];
-        if (kept.count > picked.count) {
-            [o appendFormat:@"（前面还有 %lu 行未显示）\n", (unsigned long)(kept.count - picked.count)];
+        [o appendFormat:@"⑯ 原始收发帧\n含 hex 的收发行 %lu，输出 %lu 行\n",
+            (unsigned long)frames.count, (unsigned long)picked.count];
+        if (frames.count > picked.count) {
+            [o appendFormat:@"（还有 %lu 行因字符上限未显示）\n",
+                (unsigned long)(frames.count - picked.count)];
         }
         if (sofCount.count > 0) {
-            [o appendString:@"帧首字节分布: "];
+            [o appendString:@"\n帧首字节分布:\n"];
             NSArray *ks = [sofCount.allKeys sortedArrayUsingSelector:@selector(compare:)];
             for (NSString *k in ks) {
-                [o appendFormat:@"0x%@×%ld  ", k, (long)[sofCount[k] integerValue]];
+                [o appendFormat:@"  0x%@ × %ld\n", k, (long)[sofCount[k] integerValue]];
             }
-            [o appendString:@"\n"];
         }
         [o appendString:@"\n"];
         for (NSString *l in picked) { [o appendString:l]; [o appendString:@"\n"]; }
 
         [self setContent:o];
-        [self say:[NSString stringWithFormat:@"原始收发 %ld 行", (long)kept.count]];
+        [self say:[NSString stringWithFormat:@"帧 %ld 个 · 输出 %ld",
+                   (long)frames.count, (long)picked.count]];
         self.busy = NO;
     });
 }
@@ -873,7 +886,7 @@ static NSArray *mqttNoiseKeys(void) {
         NSUInteger acc = 0;
         for (NSInteger i = (NSInteger)kept.count - 1; i >= 0; i--) {
             NSString *l = kept[i];
-            if (acc + l.length + 1 > 2350) break;
+            if (acc + l.length + 1 > 2350) continue;
             [picked insertObject:l atIndex:0];
             acc += l.length + 1;
         }
@@ -892,11 +905,27 @@ static NSArray *mqttNoiseKeys(void) {
             }
         }
 
+        // 取尾部，逐行截断，跳过超长
+        NSMutableArray *picked = [NSMutableArray array];
+        NSUInteger acc = 0;
+        for (NSInteger i = (NSInteger)kept.count - 1; i >= 0; i--) {
+            NSString *l = kept[i];
+            if (l.length > 400) l = [[l substringToIndex:400] stringByAppendingString:@"…"];
+            NSUInteger need = l.length + 1;
+            if (acc + need > 2200) continue;
+            [picked insertObject:l atIndex:0];
+            acc += need;
+        }
+
         NSMutableString *o = [NSMutableString string];
         [o appendFormat:@"⑰ AES 记录\n命中 %lu 行，输出 %lu 行\n",
             (unsigned long)kept.count, (unsigned long)picked.count];
+        if (kept.count > picked.count) {
+            [o appendFormat:@"（还有 %lu 行因字符上限未显示）\n",
+                (unsigned long)(kept.count - picked.count)];
+        }
         if (keysFound.count > 0) {
-            [o appendString:@"★ 发现 AES key:\n"];
+            [o appendString:@"\n★ 发现 AES key:\n"];
             for (NSString *k in keysFound) [o appendFormat:@"   %@\n", k];
         }
         [o appendString:@"\n"];
@@ -949,7 +978,7 @@ static NSArray *mqttNoiseKeys(void) {
         NSUInteger acc = 0;
         for (NSInteger i = (NSInteger)kept.count - 1; i >= 0; i--) {
             NSString *l = kept[i];
-            if (acc + l.length + 1 > 2350) break;
+            if (acc + l.length + 1 > 2350) continue;
             [picked insertObject:l atIndex:0];
             acc += l.length + 1;
         }
@@ -966,3 +995,4 @@ static NSArray *mqttNoiseKeys(void) {
 }
 
 @end
+
