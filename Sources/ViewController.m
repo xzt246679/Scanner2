@@ -89,9 +89,12 @@ static NSString *const kPrefRel = @"Library/Preferences/com.dfmc.dfpv.sapp.plist
         @"⑫RKE",
         @"⑬BleKey",
         @"⑭目录",
-        @"⑮时间线"
+        @"⑮时间线",
+        @"⑯原始收发",
+        @"⑰AES解密",
+        @"⑱任务队列"
     ];
-    SEL acts[15] = {
+    SEL acts[18] = {
         @selector(btnList),
         @selector(btnBleConnect),
         @selector(btnUuid),
@@ -106,18 +109,21 @@ static NSString *const kPrefRel = @"Library/Preferences/com.dfmc.dfpv.sapp.plist
         @selector(btnRke),
         @selector(btnBleKey),
         @selector(btnCerts),
-        @selector(btnTimeline)
+        @selector(btnTimeline),
+        @selector(btnRawIO),
+        @selector(btnAES),
+        @selector(btnTaskQueue)
     };
 
-    // 3 列网格
-    CGFloat bw = 100, bh = 34, gap = 4;
+    // 3 列网格，6 行
+    CGFloat bw = 100, bh = 32, gap = 4;
     NSInteger cols = 3;
-    for (NSInteger i = 0; i < 15; i++) {
+    for (NSInteger i = 0; i < 18; i++) {
         NSInteger row = i / cols;
         NSInteger col = i % cols;
         UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
         [b setTitle:titles[i] forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+        b.titleLabel.font = [UIFont boldSystemFontOfSize:10];
         b.titleLabel.adjustsFontSizeToFitWidth = YES;
         [b addTarget:self action:acts[i] forControlEvents:UIControlEventTouchUpInside];
         b.frame = CGRectMake(gap + col * (bw + gap), gap + row * (bh + gap), bw, bh);
@@ -126,7 +132,7 @@ static NSString *const kPrefRel = @"Library/Preferences/com.dfmc.dfpv.sapp.plist
         b.layer.cornerRadius = 5;
         [self.buttonScroll addSubview:b];
     }
-    CGFloat totalH = gap + 5 * (bh + gap);
+    CGFloat totalH = gap + 6 * (bh + gap);
     self.buttonScroll.contentSize = CGSizeMake(3 * (bw + gap) + gap, totalH);
 }
 
@@ -729,6 +735,232 @@ static NSArray *mqttNoiseKeys(void) {
         NSString *res = [self sliceLog:t keys:keys scanLines:scan maxChars:max title:title];
         [self setContent:res];
         [self say:[NSString stringWithFormat:@"%@ · %lu 字符", title, (unsigned long)res.length]];
+        self.busy = NO;
+    });
+}
+
+#pragma mark - 新增：协议级按钮
+
+// ⑯ 原始收发（hex 数据的完整记录）
+- (void)btnRawIO {
+    if (self.busy) return;
+    self.busy = YES;
+    [self say:@"抓原始收发…"];
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSString *t = [self mainLogText];
+        if (!t) { [self setContent:@"无主日志"]; self.busy = NO; return; }
+
+        NSArray *lines = [t componentsSeparatedByString:@"\n"];
+        NSUInteger total = lines.count;
+        NSUInteger start = (total > 60000) ? total - 60000 : 0;
+
+        // 抓所有含 hex 数据 / 收发的行
+        NSArray *keys = @[
+            @"数据接收", @"数据发送", @"发送数据", @"接收数据",
+            @"didReceiveData", @"didWriteValue", @"writeValue",
+            @"sendData", @"receivedData", @"原始数据",
+            @"hex", @"HEX", @"bytes", @"Bytes",
+            @"payload", @"Payload", @"packet", @"Packet",
+            @"SOF", @"序列号", @"序号", @"帧",
+            @"下发", @"上报", @"指令", @"命令数据"
+        ];
+
+        NSMutableArray *kept = [NSMutableArray array];
+        for (NSUInteger i = start; i < total; i++) {
+            NSString *line = lines[i];
+            if (line.length < 6) continue;
+            if ([self isNoise:line]) continue;
+            if ([self isMqttNoise:line]) continue;
+            BOOL m = NO;
+            for (NSString *k in keys) {
+                if ([line rangeOfString:k].location != NSNotFound) { m = YES; break; }
+            }
+            if (!m) continue;
+            // 必须含至少 8 位连续 hex 才保留（排除纯文字）
+            NSRange hexRange = [line rangeOfString:@"[0-9A-Fa-f]{8,}" options:NSRegularExpressionSearch];
+            if (hexRange.location == NSNotFound) {
+                // 也保留明确的收发标记行
+                if ([line rangeOfString:@"数据接收"].location == NSNotFound &&
+                    [line rangeOfString:@"数据发送"].location == NSNotFound &&
+                    [line rangeOfString:@"发送数据"].location == NSNotFound) continue;
+            }
+            [kept addObject:line];
+        }
+
+        NSMutableArray *picked = [NSMutableArray array];
+        NSUInteger acc = 0;
+        for (NSInteger i = (NSInteger)kept.count - 1; i >= 0; i--) {
+            NSString *l = kept[i];
+            if (acc + l.length + 1 > 2350) break;
+            [picked insertObject:l atIndex:0];
+            acc += l.length + 1;
+        }
+
+        // 统计出现的 hex 帧首字节
+        NSMutableDictionary *sofCount = [NSMutableDictionary dictionary];
+        for (NSString *l in kept) {
+            NSRange r = [l rangeOfString:@"[:：]\\s*([0-9A-Fa-f]{2})([0-9A-Fa-f]{2})?"
+                                 options:NSRegularExpressionSearch];
+            if (r.location != NSNotFound && r.length >= 2) {
+                NSString *sub = [l substringWithRange:r];
+                NSString *b0 = [[sub stringByReplacingOccurrencesOfString:@"：" withString:@":"]
+                                stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@": "]];
+                if (b0.length >= 2) {
+                    b0 = [[b0 substringToIndex:2] lowercaseString];
+                    sofCount[b0] = @([sofCount[b0] integerValue] + 1);
+                }
+            }
+        }
+
+        NSMutableString *o = [NSMutableString string];
+        [o appendFormat:@"⑯ 原始收发（hex 数据）\n命中 %lu 行，输出 %lu 行\n",
+            (unsigned long)kept.count, (unsigned long)picked.count];
+        if (kept.count > picked.count) {
+            [o appendFormat:@"（前面还有 %lu 行未显示）\n", (unsigned long)(kept.count - picked.count)];
+        }
+        if (sofCount.count > 0) {
+            [o appendString:@"帧首字节分布: "];
+            NSArray *ks = [sofCount.allKeys sortedArrayUsingSelector:@selector(compare:)];
+            for (NSString *k in ks) {
+                [o appendFormat:@"0x%@×%ld  ", k, (long)[sofCount[k] integerValue]];
+            }
+            [o appendString:@"\n"];
+        }
+        [o appendString:@"\n"];
+        for (NSString *l in picked) { [o appendString:l]; [o appendString:@"\n"]; }
+
+        [self setContent:o];
+        [self say:[NSString stringWithFormat:@"原始收发 %ld 行", (long)kept.count]];
+        self.busy = NO;
+    });
+}
+
+// ⑰ AES 解密相关（key / iv / 密文 / 明文）
+- (void)btnAES {
+    if (self.busy) return;
+    self.busy = YES;
+    [self say:@"抓 AES 记录…"];
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSString *t = [self mainLogText];
+        if (!t) { [self setContent:@"无主日志"]; self.busy = NO; return; }
+
+        NSArray *lines = [t componentsSeparatedByString:@"\n"];
+        NSUInteger total = lines.count;
+        NSUInteger start = (total > 60000) ? total - 60000 : 0;
+
+        NSArray *keys = @[
+            @"AES", @"aes", @"解密", @"加密", @"Decrypt", @"Encrypt",
+            @"key:", @"Key:", @"iv:", @"IV:", @"Iv:",
+            @"解密后", @"加密后", @"密文", @"明文",
+            @"plaintext", @"ciphertext",
+            @"bluetoothAccessKey", @"bluetoothConKey"
+        ];
+
+        NSMutableArray *kept = [NSMutableArray array];
+        for (NSUInteger i = start; i < total; i++) {
+            NSString *line = lines[i];
+            if (line.length < 6) continue;
+            if ([self isNoise:line]) continue;
+            if ([self isMqttNoise:line]) continue;
+            BOOL m = NO;
+            for (NSString *k in keys) {
+                if ([line rangeOfString:k].location != NSNotFound) { m = YES; break; }
+            }
+            if (m) [kept addObject:line];
+        }
+
+        NSMutableArray *picked = [NSMutableArray array];
+        NSUInteger acc = 0;
+        for (NSInteger i = (NSInteger)kept.count - 1; i >= 0; i--) {
+            NSString *l = kept[i];
+            if (acc + l.length + 1 > 2350) break;
+            [picked insertObject:l atIndex:0];
+            acc += l.length + 1;
+        }
+
+        // 提取所有出现的 AES key
+        NSMutableSet *keysFound = [NSMutableSet set];
+        for (NSString *l in kept) {
+            if ([l rangeOfString:@"解密key" options:NSCaseInsensitiveSearch].location == NSNotFound &&
+                [l rangeOfString:@"AES解密key" options:NSCaseInsensitiveSearch].location == NSNotFound) continue;
+            NSRange r = [l rangeOfString:@"[:：]\\s*[0-9a-fA-F]{16,32}" options:NSRegularExpressionSearch];
+            if (r.location != NSNotFound) {
+                NSString *sub = [l substringWithRange:r];
+                NSString *v = [[sub stringByReplacingOccurrencesOfString:@"：" withString:@":"]
+                               stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@": "]];
+                if (v.length >= 16) [keysFound addObject:v];
+            }
+        }
+
+        NSMutableString *o = [NSMutableString string];
+        [o appendFormat:@"⑰ AES 记录\n命中 %lu 行，输出 %lu 行\n",
+            (unsigned long)kept.count, (unsigned long)picked.count];
+        if (keysFound.count > 0) {
+            [o appendString:@"★ 发现 AES key:\n"];
+            for (NSString *k in keysFound) [o appendFormat:@"   %@\n", k];
+        }
+        [o appendString:@"\n"];
+        for (NSString *l in picked) { [o appendString:l]; [o appendString:@"\n"]; }
+
+        [self setContent:o];
+        [self say:[NSString stringWithFormat:@"AES %ld 行 · key %lu 个",
+                   (long)kept.count, (unsigned long)keysFound.count]];
+        self.busy = NO;
+    });
+}
+
+// ⑱ 任务队列 / 消息解析
+- (void)btnTaskQueue {
+    if (self.busy) return;
+    self.busy = YES;
+    [self say:@"抓任务队列…"];
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSString *t = [self mainLogText];
+        if (!t) { [self setContent:@"无主日志"]; self.busy = NO; return; }
+
+        NSArray *lines = [t componentsSeparatedByString:@"\n"];
+        NSUInteger total = lines.count;
+        NSUInteger start = (total > 60000) ? total - 60000 : 0;
+
+        NSArray *keys = @[
+            @"任务", @"队列", @"task", @"Task", @"queue", @"Queue",
+            @"消息type", @"消息 type", @"解析出消息", @"选中任务",
+            @"结束打印", @"开始打印", @"timeout", @"超时重试",
+            @"状态信息", @"车身状态", @"车门状态", @"后备箱状态",
+            @"车窗状态", @"更新车门", @"更新后备箱",
+            @"闭锁车辆", @"解锁车辆", @"开锁", @"锁车",
+            @"剩余有效期", @"按钮状态", @"流程结果"
+        ];
+
+        NSMutableArray *kept = [NSMutableArray array];
+        for (NSUInteger i = start; i < total; i++) {
+            NSString *line = lines[i];
+            if (line.length < 6) continue;
+            if ([self isNoise:line]) continue;
+            if ([self isMqttNoise:line]) continue;
+            BOOL m = NO;
+            for (NSString *k in keys) {
+                if ([line rangeOfString:k].location != NSNotFound) { m = YES; break; }
+            }
+            if (m) [kept addObject:line];
+        }
+
+        NSMutableArray *picked = [NSMutableArray array];
+        NSUInteger acc = 0;
+        for (NSInteger i = (NSInteger)kept.count - 1; i >= 0; i--) {
+            NSString *l = kept[i];
+            if (acc + l.length + 1 > 2350) break;
+            [picked insertObject:l atIndex:0];
+            acc += l.length + 1;
+        }
+
+        NSMutableString *o = [NSMutableString string];
+        [o appendFormat:@"⑱ 任务队列 / 消息解析\n命中 %lu 行，输出 %lu 行\n\n",
+            (unsigned long)kept.count, (unsigned long)picked.count];
+        for (NSString *l in picked) { [o appendString:l]; [o appendString:@"\n"]; }
+
+        [self setContent:o];
+        [self say:[NSString stringWithFormat:@"任务队列 %ld 行", (long)kept.count]];
         self.busy = NO;
     });
 }
