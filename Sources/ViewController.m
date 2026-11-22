@@ -6,13 +6,15 @@
 #import <objc/runtime.h>
 
 static NSString *const kTargetBundle = @"com.dfmc.dfpv.sapp";
-static NSUInteger const kMaxBufferLen = 400000;   // buffer 上限
-static NSUInteger const kMaxDisplayLen = 12000;   // 界面只显示尾部
+static NSUInteger const kMaxBufferLen = 400000;
+static NSUInteger const kMaxDisplayLen = 12000;
 static NSTimeInterval const kUIRefreshInterval = 0.25;
 
 @interface ViewController ()
 @property (nonatomic, strong) UITextView *textView;
-@property (nonatomic, strong) UIButton *button;
+@property (nonatomic, strong) UIButton *scanButton;
+@property (nonatomic, strong) UIButton *copyButton;
+@property (nonatomic, strong) UIButton *saveButton;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) NSMutableString *buffer;
 @property (nonatomic, strong) NSLock *bufLock;
@@ -24,6 +26,8 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
 
 @implementation ViewController
 
+#pragma mark - UI
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"沙盒扫描";
@@ -31,23 +35,28 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     self.buffer = [NSMutableString string];
     self.bufLock = [[NSLock alloc] init];
 
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+
+    // 状态标签
     UILabel *sl = [[UILabel alloc] init];
     sl.text = @"已启动";
-    sl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    sl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     sl.textAlignment = NSTextAlignmentCenter;
-    sl.numberOfLines = 0;
+    sl.numberOfLines = 2;
     sl.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:sl];
     self.statusLabel = sl;
 
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    [btn setTitle:@"开始扫描" forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont boldSystemFontOfSize:18];
-    [btn addTarget:self action:@selector(runScan) forControlEvents:UIControlEventTouchUpInside];
-    btn.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:btn];
-    self.button = btn;
+    // 扫描按钮
+    UIButton *scan = [UIButton buttonWithType:UIButtonTypeSystem];
+    [scan setTitle:@"开始扫描" forState:UIControlStateNormal];
+    scan.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    [scan addTarget:self action:@selector(runScan) forControlEvents:UIControlEventTouchUpInside];
+    scan.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:scan];
+    self.scanButton = scan;
 
+    // 文本区
     UITextView *tv = [[UITextView alloc] init];
     tv.font = [UIFont fontWithName:@"Menlo" size:10] ?: [UIFont systemFontOfSize:10];
     tv.editable = NO;
@@ -57,60 +66,52 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     [self.view addSubview:tv];
     self.textView = tv;
 
-    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    // 底部两个按钮
+    UIButton *copy = [UIButton buttonWithType:UIButtonTypeSystem];
+    [copy setTitle:@"复制全部" forState:UIControlStateNormal];
+    [copy addTarget:self action:@selector(copyAll) forControlEvents:UIControlEventTouchUpInside];
+    copy.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:copy];
+    self.copyButton = copy;
+
+    UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem];
+    [save setTitle:@"保存到文件" forState:UIControlStateNormal];
+    [save addTarget:self action:@selector(exportFile) forControlEvents:UIControlEventTouchUpInside];
+    save.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:save];
+    self.saveButton = save;
+
     [NSLayoutConstraint activateConstraints:@[
         [sl.topAnchor constraintEqualToAnchor:safe.topAnchor constant:6],
         [sl.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:8],
         [sl.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-8],
-        [btn.topAnchor constraintEqualToAnchor:sl.bottomAnchor constant:8],
-        [btn.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [btn.heightAnchor constraintEqualToConstant:40],
-        [tv.topAnchor constraintEqualToAnchor:btn.bottomAnchor constant:8],
+
+        [scan.topAnchor constraintEqualToAnchor:sl.bottomAnchor constant:6],
+        [scan.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [scan.heightAnchor constraintEqualToConstant:38],
+
+        [tv.topAnchor constraintEqualToAnchor:scan.bottomAnchor constant:6],
         [tv.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:4],
         [tv.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-4],
-        [tv.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor]
+
+        [copy.topAnchor constraintEqualToAnchor:tv.bottomAnchor constant:4],
+        [copy.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:24],
+        [copy.heightAnchor constraintEqualToConstant:36],
+
+        [save.topAnchor constraintEqualToAnchor:tv.bottomAnchor constant:4],
+        [save.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
+        [save.heightAnchor constraintEqualToConstant:36],
+
+        [copy.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-4],
+        [save.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-4],
     ]];
 
     self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithTitle:@"导出" style:UIBarButtonItemStylePlain
-                                        target:self action:@selector(exportFile)];
-    self.navigationItem.leftBarButtonItem =
         [[UIBarButtonItem alloc] initWithTitle:@"清空" style:UIBarButtonItemStylePlain
                                         target:self action:@selector(clearAll)];
-
-    // 底部双按钮：复制 / 导出文件
-    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    [copyBtn setTitle:@"复制全部" forState:UIControlStateNormal];
-    [copyBtn addTarget:self action:@selector(copyAll) forControlEvents:UIControlEventTouchUpInside];
-    copyBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:copyBtn];
-
-    UIButton *saveBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    [saveBtn setTitle:@"保存到文件" forState:UIControlStateNormal];
-    [saveBtn addTarget:self action:@selector(exportFile) forControlEvents:UIControlEventTouchUpInside];
-    saveBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:saveBtn];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [copyBtn.topAnchor constraintEqualToAnchor:tv.bottomAnchor constant:4],
-        [copyBtn.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
-        [copyBtn.heightAnchor constraintEqualToConstant:38],
-        [copyBtn.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-4],
-
-        [saveBtn.topAnchor constraintEqualToAnchor:tv.bottomAnchor constant:4],
-        [saveBtn.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
-        [saveBtn.heightAnchor constraintEqualToConstant:38],
-        [saveBtn.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-4],
-    ]];
-    // tv 底部改为对齐按钮上方
-    for (NSLayoutConstraint *c in self.view.constraints) {
-        if (c.firstItem == tv && c.firstAttribute == NSLayoutAttributeBottom) {
-            [self.view removeConstraint:c];
-            break;
-        }
-    }
-    [tv.bottomAnchor constraintEqualToAnchor:copyBtn.topAnchor constant:-4].active = YES;
 }
+
+#pragma mark - 按钮
 
 - (void)clearAll {
     [self.bufLock lock];
@@ -130,7 +131,6 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
         return;
     }
 
-    // 分段复制：iOS 剪贴板单次超大文本容易失败
     UIPasteboard *pb = [UIPasteboard generalPasteboard];
     @try {
         pb.string = snap;
@@ -138,16 +138,13 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
             self.statusLabel.text = [NSString stringWithFormat:@"已复制 %lu 字符", (unsigned long)snap.length];
             return;
         }
-    } @catch (NSException *e) {
-        // fallthrough
-    }
+    } @catch (NSException *e) { }
 
-    // 失败则尝试截断复制
-    NSUInteger cap = MIN(snap.length, (NSUInteger)100000);
+    NSUInteger cap = MIN(snap.length, (NSUInteger)80000);
     NSString *part = [snap substringToIndex:cap];
     @try {
         pb.string = part;
-        self.statusLabel.text = [NSString stringWithFormat:@"内容太长，已复制前 %lu 字符（建议用「保存到文件」）", (unsigned long)cap];
+        self.statusLabel.text = [NSString stringWithFormat:@"太长，已复制前 %lu 字符（建议保存到文件）", (unsigned long)cap];
     } @catch (NSException *e) {
         self.statusLabel.text = @"复制失败，请用「保存到文件」";
     }
@@ -172,11 +169,13 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     NSError *err = nil;
     BOOL ok = [snap writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err];
     if (ok) {
-        self.statusLabel.text = [NSString stringWithFormat:@"已保存 %@（%lu 字节）", name, (unsigned long)[snap lengthOfBytesUsingEncoding:NSUTF8StringEncoding]];
-        UIAlertController *ac = [UIAlertController
-            alertControllerWithTitle:@"已保存到 App 沙盒"
-                             message:[NSString stringWithFormat:@"文件名：%@\n\n打开「文件」App → 我的 iPhone → 沙盒扫描 → 找到这个文件\n\n路径：\n%@", name, path]
-                      preferredStyle:UIAlertControllerStyleAlert];
+        self.statusLabel.text = [NSString stringWithFormat:@"已保存 %@", name];
+        NSString *msg = [NSString stringWithFormat:
+            @"文件名：%@\n\n打开「文件」App → 我的 iPhone → 沙盒扫描 → %@\n\n完整路径：\n%@",
+            name, name, path];
+        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已保存"
+                                                                   message:msg
+                                                            preferredStyle:UIAlertControllerStyleAlert];
         [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault]];
         [self presentViewController:ac animated:YES completion:nil];
     } else {
@@ -184,7 +183,7 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     }
 }
 
-// ========== 日志：只 append，节流刷新 UI ==========
+#pragma mark - 日志
 
 - (void)logRaw:(NSString *)s {
     if (self.aborted) return;
@@ -212,7 +211,7 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
                     [snap substringFromIndex:snap.length - kMaxDisplayLen]];
         }
         self.textView.text = snap;
-        self.statusLabel.text = [NSString stringWithFormat:@"扫描中 · 已记录 %lu 字符", (unsigned long)total];
+        self.statusLabel.text = [NSString stringWithFormat:@"扫描中 · 已记 %lu 字符", (unsigned long)total];
     });
 }
 
@@ -228,7 +227,7 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     self.aborted = NO;
     self.fileVisits = 0;
     self.statusLabel.text = @"扫描中…";
-    self.button.enabled = NO;
+    self.scanButton.enabled = NO;
     [self.bufLock lock];
     [self.buffer setString:@""];
     [self.bufLock unlock];
@@ -239,7 +238,7 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
         __strong typeof(weakSelf) s2 = weakSelf;
         if (!s2) return;
         @try { [s2 scanAll]; }
-        @catch (NSException *e) { [s2 log:@"!!! 异常 %@ - %@", e.name, e.reason]; }
+        @catch (NSException *e) { [s2 log:@"!!! %@ - %@", e.name, e.reason]; }
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) s3 = weakSelf;
             if (!s3) return;
@@ -253,7 +252,7 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
                         [snap substringFromIndex:snap.length - kMaxDisplayLen]];
             }
             s3.textView.text = snap;
-            s3.button.enabled = YES;
+            s3.scanButton.enabled = YES;
             s3.statusLabel.text = [NSString stringWithFormat:@"完成 · %lu 字符", (unsigned long)snap.length];
         });
     });
@@ -278,33 +277,10 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     }
 
     [self log:@""];
-    [self log:@"========== 定位目标 =========="];
-    NSString *root = nil;
-
-    // 方式A：直接列容器（最快）
-    root = [self findContainerDirect];
+    [self log:@"========== 定位 =========="];
+    NSString *root = [self findContainerDirect];
     if (root) {
-        [self log:@"[A 直接列容器] 成功"];
-    } else {
-        [self log:@"[A 直接列容器] 失败"];
-        // 方式B：MCM 私有 API
-        root = [self tryMCM];
-        if (root) {
-            [self log:@"[B MCM API] 成功"];
-        } else {
-            [self log:@"[B MCM API] 失败"];
-            // 方式C：Bundle 反查
-            root = [self tryBundleScan];
-            if (root) {
-                [self log:@"[C Bundle反查] 成功"];
-            } else {
-                [self log:@"[C Bundle反查] 失败"];
-            }
-        }
-    }
-
-    if (root) {
-        [self log:@"路径: %@", root];
+        [self log:@"✅ 命中: %@", root];
         [self log:@""];
         [self log:@"========== 目录树 =========="];
         [self walk:root depth:0 maxDepth:4];
@@ -315,8 +291,7 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
         [self log:@"========== 协议 =========="];
         [self detectProtocol:root];
     } else {
-        [self log:@"全部方式失败，导出 Bundle 清单供诊断"];
-        [self dumpBundleList];
+        [self log:@"❌ 未定位到容器"];
     }
 
     [self log:@""];
@@ -324,65 +299,11 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     [self dumpKeychain];
 
     [self log:@""];
-    [self log:@"========== 激活状态诊断 =========="];
+    [self log:@"========== 激活诊断 =========="];
     [self diagnoseActivation:root];
 
     [self log:@""];
     [self log:@"========== 完成 =========="];
-}
-
-- (void)diagnoseActivation:(NSString *)root {
-    if (!root) {
-        [self log:@"无容器路径，无法诊断"];
-        return;
-    }
-    NSFileManager *fm = [NSFileManager defaultManager];
-
-    NSArray *mustHave = @[@"Documents", @"Library"];
-    for (NSString *d in mustHave) {
-        NSString *p = [root stringByAppendingPathComponent:d];
-        BOOL isDir = NO;
-        BOOL e = [fm fileExistsAtPath:p isDirectory:&isDir];
-        [self log:@"%@ %@  (%@)", e ? @"✓" : @"✗", d, e ? (isDir ? @"目录" : @"文件") : @"不存在"];
-    }
-
-    NSArray *keyPaths = @[
-        @"Documents/private",
-        @"Documents/private/instance_ca_key.pem",
-        @"Documents/certs",
-        @"Documents/digitalkeys",
-        @"Documents/csr",
-        @"Documents/uap",
-        @"Library/Preferences/com.dfmc.dfpv.sapp.plist"
-    ];
-    NSInteger exist = 0;
-    for (NSString *rel in keyPaths) {
-        NSString *p = [root stringByAppendingPathComponent:rel];
-        BOOL e = [fm fileExistsAtPath:p];
-        if (e) exist++;
-        [self log:@"%@ %@", e ? @"✓" : @"✗", rel];
-    }
-
-    [self log:@""];
-    if (exist == 0) {
-        [self log:@"结论：该 App 从未激活过蓝牙钥匙"];
-        [self log:@"  → 没有任何密钥材料、证书、digitalkey 目录"];
-        [self log:@"  → 需要先在东风奕派里完成激活（车内 + 通电）"];
-    } else if (![fm fileExistsAtPath:[root stringByAppendingPathComponent:@"Documents/private"]] &&
-               ![fm fileExistsAtPath:[root stringByAppendingPathComponent:@"Documents/digitalkeys"]]) {
-        [self log:@"结论：有部分数据，但缺密钥目录"];
-        [self log:@"  → 可能激活流程未完成，或用的不是文件型密钥"];
-    } else {
-        [self log:@"结论：存在密钥相关目录，激活过"];
-    }
-
-    // 列出 App 顶层所有条目（帮助判断数据在哪）
-    [self log:@""];
-    [self log:@"容器顶层条目："];
-    NSArray *top = [fm contentsOfDirectoryAtPath:root error:NULL];
-    for (NSString *t in top) {
-        [self log:@"  %@", t];
-    }
 }
 
 - (NSString *)machineModel {
@@ -393,8 +314,7 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
 
 - (BOOL)canRead:(NSString *)path {
     NSError *err = nil;
-    NSArray *a = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:&err];
-    return a != nil;
+    return [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:&err] != nil;
 }
 
 - (BOOL)bumpVisit {
@@ -402,48 +322,48 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     if (self.fileVisits > 30000) {
         if (!self.aborted) {
             self.aborted = YES;
-            [self log:@"!!! 达到遍历上限 30000，已停止后续递归"];
+            [self log:@"!!! 达到遍历上限，停止"];
         }
         return NO;
     }
     return !self.aborted;
 }
 
-// A：直接列容器目录（权限已生效时最有效）
 - (NSString *)findContainerDirect {
     NSString *base = @"/var/mobile/Containers/Data/Application";
     NSError *err = nil;
     NSArray *dirs = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:base error:&err];
     if (!dirs) {
-        [self log:@"  容器目录不可读: %@", err.localizedDescription];
+        [self log:@"  不可读: %@", err.localizedDescription];
         return nil;
     }
     [self log:@"  容器数 %lu", (unsigned long)dirs.count];
 
-    // 第一轮：精确匹配 metadata
     for (NSString *d in dirs) {
         if (![self bumpVisit]) return nil;
         NSString *meta = [NSString stringWithFormat:@"%@/%@/.com.apple.mobile_container_manager.metadata.plist", base, d];
         NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:meta];
         NSString *ident = dict[@"MCMMetadataIdentifier"];
         if (ident && [ident isEqualToString:kTargetBundle]) {
+            [self log:@"  [轮1 精确] %@", ident];
             return [NSString stringWithFormat:@"%@/%@", base, d];
         }
     }
-    [self log:@"  metadata 未命中，做第二轮关键词匹配"];
-    // 第二轮：关键词（有些容器 metadata 不同步）
+    [self log:@"  轮1 未命中，转轮2"];
+
     for (NSString *d in dirs) {
         if (![self bumpVisit]) return nil;
         NSString *meta = [NSString stringWithFormat:@"%@/%@/.com.apple.mobile_container_manager.metadata.plist", base, d];
         NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:meta];
         NSString *ident = dict[@"MCMMetadataIdentifier"];
         if (ident && ([ident containsString:@"dfmc"] || [ident containsString:@"dfpv"] ||
-                      [ident containsString:@"sapp"])) {
-            [self log:@"  近似命中: %@", ident];
+                      [ident containsString:@"sapp"] || [ident containsString:@"slyan"])) {
+            [self log:@"  [轮2 关键词] %@", ident];
             return [NSString stringWithFormat:@"%@/%@", base, d];
         }
     }
-    // 第三轮：看目录里有没有东风奕派的特征
+    [self log:@"  轮2 未命中，转轮3"];
+
     for (NSString *d in dirs) {
         if (![self bumpVisit]) return nil;
         NSString *p = [NSString stringWithFormat:@"%@/%@/Documents", base, d];
@@ -452,120 +372,23 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
         for (NSString *it in items) {
             if ([it containsString:@"digitalkey"] || [it containsString:@"ingeek"] ||
                 [it containsString:@"carkey"] || [it hasPrefix:@"c11_"] ||
-                [it hasPrefix:@"icce"]) {
-                [self log:@"  特征命中: %@/%@", d, it];
+                [it hasPrefix:@"icce"] || [it containsString:@"dk_"]) {
+                [self log:@"  [轮3 特征] %@ 里有 %@", d, it];
                 return [NSString stringWithFormat:@"%@/%@", base, d];
             }
         }
     }
-    [self log:@"  三轮匹配均未命中"];
-    // 打印前 30 个容器名帮助诊断
-    [self log:@"  容器列表（前30）:"];
+    [self log:@"  轮3 未命中"];
+
+    [self log:@"  容器清单（前40）:"];
     NSInteger i = 0;
     for (NSString *d in dirs) {
         NSString *meta = [NSString stringWithFormat:@"%@/%@/.com.apple.mobile_container_manager.metadata.plist", base, d];
         NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:meta];
-        [self log:@"    %@", dict[@"MCMMetadataIdentifier"] ?: @"?"];
-        if (++i >= 30) break;
+        [self log:@"    %@", dict[@"MCMMetadataIdentifier"] ?: @"(no meta)"];
+        if (++i >= 40) break;
     }
     return nil;
-}
-
-// B：MCM 私有 API（安全版：先检查 selector）
-- (NSString *)tryMCM {
-    void *h = dlopen("/System/Library/PrivateFrameworks/MobileContainerManager.framework/MobileContainerManager", RTLD_LAZY);
-    if (!h) {
-        [self log:@"  dlopen 失败"];
-        return nil;
-    }
-    Class cls = NSClassFromString(@"MCMAppDataContainer");
-    if (!cls) {
-        [self log:@"  无 MCMAppDataContainer"];
-        dlclose(h);
-        return nil;
-    }
-    SEL sel = NSSelectorFromString(@"containerWithIdentifier:createIfNecessary:existed:error:");
-    if (![cls respondsToSelector:sel]) {
-        [self log:@"  无该 selector"];
-        dlclose(h);
-        return nil;
-    }
-    NSString *result = nil;
-    @try {
-        id (*fn)(id, SEL, NSString *, BOOL, BOOL *, NSError **) =
-            (id (*)(id, SEL, NSString *, BOOL, BOOL *, NSError **))objc_msgSend;
-        id c = fn(cls, sel, kTargetBundle, NO, NULL, NULL);
-        if (c) {
-            SEL psel = NSSelectorFromString(@"containerPath");
-            if ([c respondsToSelector:psel]) {
-                result = [c performSelector:psel];
-            }
-        }
-    } @catch (NSException *e) {
-        [self log:@"  异常 %@", e.reason];
-    }
-    dlclose(h);
-    return result;
-}
-
-// C：Bundle 反查（限制数量）
-- (NSString *)tryBundleScan {
-    NSString *base = @"/var/containers/Bundle/Application";
-    NSError *err = nil;
-    NSArray *uuids = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:base error:&err];
-    if (!uuids) {
-        [self log:@"  Bundle 不可读"];
-        return nil;
-    }
-    [self log:@"  Bundle 下 %lu 个 UUID", (unsigned long)uuids.count];
-    NSUInteger checked = 0;
-    for (NSString *u in uuids) {
-        if (![self bumpVisit]) return nil;
-        NSString *appDir = [NSString stringWithFormat:@"%@/%@", base, u];
-        NSArray *apps = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:appDir error:NULL];
-        for (NSString *app in apps) {
-            if (![app hasSuffix:@".app"]) continue;
-            checked++;
-            if (checked > 500) {
-                [self log:@"  已检查 500 个 App，停止"];
-                return nil;
-            }
-            NSString *infoPlist = [NSString stringWithFormat:@"%@/%@/Info.plist", appDir, app];
-            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPlist];
-            NSString *bid = info[@"CFBundleIdentifier"];
-            if ([bid isEqualToString:kTargetBundle]) {
-                [self log:@"  命中 bundle: %@", app];
-                NSString *guess = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", u];
-                if ([self canRead:guess]) {
-                    [self log:@"  Data UUID 相同"];
-                    return guess;
-                }
-                [self log:@"  Data UUID 不同，返回 bundle 路径"];
-                return [NSString stringWithFormat:@"%@/%@", appDir, app];
-            }
-        }
-    }
-    [self log:@"  已检查 %lu 个 App，未命中", (unsigned long)checked];
-    return nil;
-}
-
-- (void)dumpBundleList {
-    NSString *base = @"/var/containers/Bundle/Application";
-    NSArray *uuids = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:base error:NULL];
-    if (!uuids) { [self log:@"Bundle 不可读"]; return; }
-    NSUInteger shown = 0;
-    for (NSString *u in uuids) {
-        if (![self bumpVisit]) return;
-        NSString *appDir = [NSString stringWithFormat:@"%@/%@", base, u];
-        NSArray *apps = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:appDir error:NULL];
-        for (NSString *app in apps) {
-            if (![app hasSuffix:@".app"]) continue;
-            NSString *ip = [NSString stringWithFormat:@"%@/%@/Info.plist", appDir, app];
-            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:ip];
-            [self log:@"  %@", info[@"CFBundleIdentifier"] ?: @"?"];
-            if (++shown >= 80) return;
-        }
-    }
 }
 
 - (void)walk:(NSString *)path depth:(NSInteger)depth maxDepth:(NSInteger)maxDepth {
@@ -574,20 +397,24 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     for (NSInteger i = 0; i < depth; i++) [indent appendString:@"  "];
     NSArray *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:NULL];
     if (!items) { [self log:@"%@[不可读]", indent]; return; }
+
     NSInteger n = 0;
     NSInteger skipped = 0;
     for (NSString *name in [items sortedArrayUsingSelector:@selector(compare:)]) {
         if (![self bumpVisit]) return;
-        // 跳过资源文件，避免刷屏卡死
         NSString *lower = [name lowercaseString];
         BOOL isAsset = [lower hasSuffix:@".png"] || [lower hasSuffix:@".jpg"] ||
                        [lower hasSuffix:@".jpeg"] || [lower hasSuffix:@".gif"] ||
                        [lower hasSuffix:@".svg"] || [lower hasSuffix:@".pdf"] ||
                        [lower hasSuffix:@".ttf"] || [lower hasSuffix:@".otf"] ||
                        [lower hasSuffix:@".car"] || [lower hasSuffix:@".mp3"] ||
-                       [lower hasSuffix:@".mp4"] || [lower hasSuffix:@".lottie"];
+                       [lower hasSuffix:@".mp4"] || [lower hasSuffix:@".lottie"] ||
+                       [lower hasSuffix:@".jsbundle"] || [lower hasSuffix:@".bundle"];
         if (isAsset) { skipped++; continue; }
-        if (++n > 200) { [self log:@"%@…(超过200项，略。已跳过资源 %ld 个)", indent, (long)skipped]; return; }
+        if (++n > 200) {
+            [self log:@"%@…(超200项，已跳过资源 %ld 个)", indent, (long)skipped];
+            return;
+        }
         NSString *full = [path stringByAppendingPathComponent:name];
         BOOL isDir = NO;
         if (![[NSFileManager defaultManager] fileExistsAtPath:full isDirectory:&isDir]) continue;
@@ -600,7 +427,7 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
         }
     }
     if (skipped > 0) {
-        [self log:@"%@  (另有 %ld 个资源文件已跳过)", indent, (long)skipped];
+        [self log:@"%@  (跳过 %ld 个资源文件)", indent, (long)skipped];
     }
 }
 
@@ -612,7 +439,7 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     [self log:@"候选 %lu 个", (unsigned long)hits.count];
     NSUInteger i = 0;
     for (NSString *f in hits) {
-        if (self.aborted || ++i > 200) { [self log:@"…超过200个，停止"]; break; }
+        if (self.aborted || ++i > 200) { [self log:@"…超200个，停"]; break; }
         NSString *rel = [f stringByReplacingOccurrencesOfString:root withString:@""];
         NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:f error:NULL];
         unsigned long long sz = [attrs[NSFileSize] unsignedLongLongValue];
@@ -704,11 +531,50 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
             for (NSDictionary *it in arr) {
                 if (i++ >= 30) break;
                 [self log:@"   svc=%@ acct=%@", it[(__bridge id)kSecAttrService] ?: @"-",
-                       it[(__bridge id)kSecAttrAccount] ?: @"-"];
+                       [it[(__bridge id)kSecAttrAccount] description] ?: @"-"];
             }
         } else if (r) {
             CFRelease(r);
         }
+    }
+}
+
+- (void)diagnoseActivation:(NSString *)root {
+    if (!root) { [self log:@"无容器路径"]; return; }
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    NSArray *keyPaths = @[
+        @"Documents",
+        @"Library",
+        @"Documents/private",
+        @"Documents/private/instance_ca_key.pem",
+        @"Documents/certs",
+        @"Documents/digitalkeys",
+        @"Documents/csr",
+        @"Documents/uap",
+        @"Library/Preferences/com.dfmc.dfpv.sapp.plist"
+    ];
+    NSInteger exist = 0;
+    for (NSString *rel in keyPaths) {
+        NSString *p = [root stringByAppendingPathComponent:rel];
+        BOOL e = [fm fileExistsAtPath:p];
+        if (e && ![rel isEqualToString:@"Documents"] && ![rel isEqualToString:@"Library"]) exist++;
+        [self log:@"%@ %@", e ? @"✓" : @"✗", rel];
+    }
+
+    [self log:@""];
+    if (exist == 0) {
+        [self log:@"⚠️ 结论：没有任何密钥材料"];
+        [self log:@"   → 这个 App 从未激活过蓝牙钥匙"];
+        [self log:@"   → 需要先激活（坐进车内 + 车辆通电）"];
+    } else {
+        [self log:@"✅ 结论：存在密钥相关数据（%ld 项）", (long)exist];
+    }
+
+    [self log:@""];
+    [self log:@"容器顶层条目："];
+    for (NSString *t in [fm contentsOfDirectoryAtPath:root error:NULL]) {
+        [self log:@"  %@", t];
     }
 }
 
