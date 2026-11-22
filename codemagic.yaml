@@ -6,13 +6,6 @@ workflows:
     environment:
       xcode: latest
     scripts:
-      - name: Show toolchain
-        script: |
-          set -e
-          sw_vers
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-version
-
       - name: Compile Objective-C
         script: |
           set -e
@@ -23,9 +16,8 @@ workflows:
           clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 -fobjc-arc -O2 -framework UIKit -framework Foundation -framework Security -o "$APP/SandboxScanner" Sources/main.m Sources/AppDelegate.m Sources/ViewController.m
           cp Info.plist "$APP/Info.plist"
           chmod +x "$APP/SandboxScanner"
-          ls -la "$APP"
 
-      - name: Generate entitlements
+      - name: Generate entitlements v6 (6 keys + AppDataContainers only)
         script: |
           set -e
           python3 - <<'PYEOF'
@@ -37,13 +29,13 @@ workflows:
               "platform-application": True,
               "com.apple.private.security.no-sandbox": True,
               "com.apple.private.security.container-required": False,
+              "com.apple.private.security.storage.AppDataContainers": True,
           }
           with open("final.entitlements", "wb") as f:
               plistlib.dump(ent, f, fmt=plistlib.FMT_XML)
-          print("written, keys:", len(ent))
+          print("keys:", len(ent))
           PYEOF
           plutil -lint final.entitlements
-          cat final.entitlements
 
       - name: Sign with codesign
         script: |
@@ -53,47 +45,12 @@ workflows:
           echo "rc=$?"
           codesign -d --entitlements :- "$BIN" 2>&1 | head -30
 
-      - name: Verify
-        script: |
-          set +e
-          BIN=build/Payload/SandboxScanner.app/SandboxScanner
-          otool -L "$BIN" | grep -i swift && echo "HAS_SWIFT" || echo "NO_SWIFT"
-          python3 - "$BIN" <<'PYEOF'
-          import sys, struct
-          d = open(sys.argv[1], 'rb').read()
-          ncmds = struct.unpack('<I', d[16:20])[0]
-          q = 32
-          sigoff = sigsize = 0
-          for _ in range(ncmds):
-              cmd, sz = struct.unpack('<II', d[q:q+8])
-              if cmd == 0x1D:
-                  sigoff, sigsize = struct.unpack('<II', d[q+8:q+16])
-              if sz == 0:
-                  break
-              q += sz
-          blob = d[sigoff:sigoff+sigsize]
-          magic, length, count = struct.unpack('>III', blob[0:12])
-          idx = 12
-          slots = {}
-          for _ in range(count):
-              sto, sst = struct.unpack('>II', blob[idx:idx+8])
-              idx += 8
-              slots[sto] = sst
-          o = slots[0]
-          cdm, cdl, cdver, cdflags = struct.unpack('>IIII', blob[o:o+16])
-          print("SuperBlob count=%d" % count)
-          print("CodeDirectory flags=0x%x" % cdflags)
-          for k in sorted(slots):
-              print("  slot 0x%08X" % k)
-          PYEOF
-
       - name: Package IPA
         script: |
           set -e
           cd build
           zip -qry ../SandboxScanner.ipa Payload
           cd ..
-          ls -la SandboxScanner.ipa
           shasum -a 256 SandboxScanner.ipa
 
     artifacts:
