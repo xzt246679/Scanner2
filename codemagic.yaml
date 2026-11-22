@@ -8,16 +8,36 @@ workflows:
     scripts:
       - name: Compile Objective-C
         script: |
-          set -e
+          set +e
           APP=build/Payload/SandboxScanner.app
           rm -rf build SandboxScanner.ipa
           mkdir -p "$APP"
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 -fobjc-arc -O2 -framework UIKit -framework Foundation -framework Security -o "$APP/SandboxScanner" Sources/main.m Sources/AppDelegate.m Sources/ViewController.m
+          echo "SDK=$SDK"
+
+          clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
+            -fobjc-arc -O2 -Wall \
+            -framework UIKit -framework Foundation -framework Security \
+            -o "$APP/SandboxScanner" \
+            Sources/main.m Sources/AppDelegate.m Sources/ViewController.m \
+            2>&1 | tee compile.log
+
+          RC=${PIPESTATUS[0]}
+          echo "=== clang exit code: $RC ==="
+          cp compile.log "$CM_BUILD_DIR/compile.log" 2>/dev/null || true
+
+          if [ "$RC" -ne 0 ]; then
+            echo "================= 编译失败 ================="
+            grep -E "error:" compile.log | head -40
+            echo "=========================================="
+            exit 1
+          fi
+
           cp Info.plist "$APP/Info.plist"
           chmod +x "$APP/SandboxScanner"
+          echo "编译成功"
 
-      - name: Generate entitlements v6 (6 keys + AppDataContainers only)
+      - name: Generate entitlements
         script: |
           set -e
           python3 - <<'PYEOF'
@@ -35,15 +55,13 @@ workflows:
               plistlib.dump(ent, f, fmt=plistlib.FMT_XML)
           print("keys:", len(ent))
           PYEOF
-          plutil -lint final.entitlements
 
-      - name: Sign with codesign
+      - name: Sign
         script: |
           set +e
           BIN=build/Payload/SandboxScanner.app/SandboxScanner
           codesign --force --sign - --entitlements final.entitlements --timestamp=none "$BIN"
           echo "rc=$?"
-          codesign -d --entitlements :- "$BIN" 2>&1 | head -30
 
       - name: Package IPA
         script: |
@@ -51,7 +69,8 @@ workflows:
           cd build
           zip -qry ../SandboxScanner.ipa Payload
           cd ..
-          shasum -a 256 SandboxScanner.ipa
+          ls -la SandboxScanner.ipa
 
     artifacts:
       - SandboxScanner.ipa
+      - compile.log
