@@ -1,6 +1,6 @@
 workflows:
   ios-trollstore-ipa:
-    name: Build SandboxScanner IPA (ObjC + ldid)
+    name: Build SandboxScanner IPA
     instance_type: mac_mini_m2
     max_build_duration: 30
     environment:
@@ -13,14 +13,7 @@ workflows:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
-      - name: Install ldid
-        script: |
-          set -e
-          brew install ldid
-          which ldid
-          ldid -h 2>&1 | head -20 || true
-
-      - name: Compile Objective-C sources
+      - name: Compile Objective-C
         script: |
           set -e
           APP=build/Payload/SandboxScanner.app
@@ -28,9 +21,7 @@ workflows:
           mkdir -p "$APP"
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 
-          clang -arch arm64 \
-            -isysroot "$SDK" \
-            -mios-version-min=14.0 \
+          clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
             -fobjc-arc -O2 \
             -framework UIKit -framework Foundation -framework Security \
             -o "$APP/SandboxScanner" \
@@ -40,7 +31,7 @@ workflows:
           chmod +x "$APP/SandboxScanner"
           ls -la "$APP"
 
-      - name: Write entitlements
+      - name: Write entitlements (v1 level: 6 keys only)
         script: |
           set -e
           cat > final.entitlements <<'ENTEOF'
@@ -60,41 +51,30 @@ workflows:
             <true/>
             <key>com.apple.private.security.container-required</key>
             <false/>
-            <key>com.apple.private.security.storage.AppDataContainers</key>
-            <true/>
-            <key>com.apple.private.skip-library-validation</key>
-            <true/>
-            <key>keychain-access-groups</key>
-            <array>
-              <string>com.coldcoffee.sandboxscanner</string>
-              <string>*</string>
-            </array>
           </dict>
           </plist>
           ENTEOF
           plutil -lint final.entitlements
+          cat final.entitlements
 
-      - name: Sign with ldid -M (generates DER entitlements)
+      - name: Sign with codesign (ad-hoc, same as v1)
         script: |
           set +e
           BIN=build/Payload/SandboxScanner.app/SandboxScanner
-          LDID=$(which ldid)
+          codesign --force --sign - --entitlements final.entitlements --timestamp=none "$BIN"
+          echo "rc=$?"
+          echo "=== dump ==="
+          codesign -d --entitlements :- "$BIN" 2>&1 | head -30
 
-          echo "=== ldid version ==="
-          $LDID -h 2>&1 | head -3 || true
-
-          echo "=== sign: -M -S (M = generate DER entitlements, TrollStore mode) ==="
-          $LDID -M -Sfinal.entitlements "$BIN"
-          echo "ldid rc=$?"
-
-          echo "=== readback xml ==="
-          $LDID -e "$BIN" 2>&1 | head -40
-
-          echo "=== check DER slot ==="
+      - name: Verify
+        script: |
+          set +e
+          BIN=build/Payload/SandboxScanner.app/SandboxScanner
+          otool -L "$BIN" | grep -i swift && echo "!! Swift" || echo "no swift OK"
+          echo
           python3 - "$BIN" <<'PYEOF'
           import sys, struct
-          p = sys.argv[1]
-          d = open(p, 'rb').read()
+          d = open(sys.argv[1], 'rb').read()
           ncmds = struct.unpack('<I', d[16:20])[0]
           q = 32
           sigoff = sigsize = 0
@@ -112,27 +92,15 @@ workflows:
               sto, sst = struct.unpack('>II', blob[idx:idx+8])
               idx += 8
               slots[sto] = sst
-          print("SuperBlob magic=0x%08X count=%d" % (magic, count))
-          names = {0:'CodeDirectory',2:'Requirements',5:'Entitlements',6:'DER-Entitlements',
-                   7:'AltCodeDirectory',0x1000:'Signature',0x10000:'AltCD2'}
-          for k, v in sorted(slots.items()):
-              print("  slot 0x%08X %-20s off=%d" % (k, names.get(k,'?'), v))
-          print()
-          if 6 in slots:
-              print("✅ 存在 DER entitlements (slot 6)")
-          else:
-              print("❌ 仍然没有 DER entitlements")
+          print("SuperBlob count=%d slots=%s" % (count, sorted(hex(k) for k in slots)))
+          o = slots[0]
+          cdm, cdl, cdver, cdflags = struct.unpack('>IIII', blob[o:o+16])
+          print("CodeDirectory flags=0x%x (0x2=ADHOC, 0x100=LINKER_SIGNED)" % cdflags)
+          names = {0:'CodeDirectory',2:'Requirements',5:'Entitlements',6:'DER-Ents',
+                   7:'AltCD',0x1000:'Signature'}
+          for k in sorted(slots):
+              print("  slot 0x%08X %s" % (k, names.get(k,'?')))
           PYEOF
-
-      - name: Verify
-        script: |
-          set +e
-          BIN=build/Payload/SandboxScanner.app/SandboxScanner
-          echo "=== swift deps ==="
-          otool -L "$BIN" | grep -i swift && echo "有 Swift 依赖" || echo "无 Swift 依赖 ✅"
-          echo
-          echo "=== codesign dump ==="
-          codesign -d --entitlements :- "$BIN" 2>&1 | head -40
 
       - name: Package IPA
         script: |
@@ -142,7 +110,6 @@ workflows:
           cd ..
           ls -la SandboxScanner.ipa
           shasum -a 256 SandboxScanner.ipa
-          echo "IPA READY"
 
     artifacts:
       - SandboxScanner.ipa
