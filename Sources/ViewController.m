@@ -72,11 +72,44 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     ]];
 
     self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithTitle:@"复制" style:UIBarButtonItemStylePlain
-                                        target:self action:@selector(copyAll)];
+        [[UIBarButtonItem alloc] initWithTitle:@"导出" style:UIBarButtonItemStylePlain
+                                        target:self action:@selector(exportFile)];
     self.navigationItem.leftBarButtonItem =
         [[UIBarButtonItem alloc] initWithTitle:@"清空" style:UIBarButtonItemStylePlain
                                         target:self action:@selector(clearAll)];
+
+    // 底部双按钮：复制 / 导出文件
+    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [copyBtn setTitle:@"复制全部" forState:UIControlStateNormal];
+    [copyBtn addTarget:self action:@selector(copyAll) forControlEvents:UIControlEventTouchUpInside];
+    copyBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:copyBtn];
+
+    UIButton *saveBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [saveBtn setTitle:@"保存到文件" forState:UIControlStateNormal];
+    [saveBtn addTarget:self action:@selector(exportFile) forControlEvents:UIControlEventTouchUpInside];
+    saveBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:saveBtn];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [copyBtn.topAnchor constraintEqualToAnchor:tv.bottomAnchor constant:4],
+        [copyBtn.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
+        [copyBtn.heightAnchor constraintEqualToConstant:38],
+        [copyBtn.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-4],
+
+        [saveBtn.topAnchor constraintEqualToAnchor:tv.bottomAnchor constant:4],
+        [saveBtn.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
+        [saveBtn.heightAnchor constraintEqualToConstant:38],
+        [saveBtn.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-4],
+    ]];
+    // tv 底部改为对齐按钮上方
+    for (NSLayoutConstraint *c in self.view.constraints) {
+        if (c.firstItem == tv && c.firstAttribute == NSLayoutAttributeBottom) {
+            [self.view removeConstraint:c];
+            break;
+        }
+    }
+    [tv.bottomAnchor constraintEqualToAnchor:copyBtn.topAnchor constant:-4].active = YES;
 }
 
 - (void)clearAll {
@@ -91,8 +124,64 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     [self.bufLock lock];
     NSString *snap = [self.buffer copy];
     [self.bufLock unlock];
-    [UIPasteboard generalPasteboard].string = snap;
-    self.statusLabel.text = [NSString stringWithFormat:@"已复制 %lu 字符", (unsigned long)snap.length];
+
+    if (snap.length == 0) {
+        self.statusLabel.text = @"内容为空，先扫描";
+        return;
+    }
+
+    // 分段复制：iOS 剪贴板单次超大文本容易失败
+    UIPasteboard *pb = [UIPasteboard generalPasteboard];
+    @try {
+        pb.string = snap;
+        if ([pb.string isEqualToString:snap]) {
+            self.statusLabel.text = [NSString stringWithFormat:@"已复制 %lu 字符", (unsigned long)snap.length];
+            return;
+        }
+    } @catch (NSException *e) {
+        // fallthrough
+    }
+
+    // 失败则尝试截断复制
+    NSUInteger cap = MIN(snap.length, (NSUInteger)100000);
+    NSString *part = [snap substringToIndex:cap];
+    @try {
+        pb.string = part;
+        self.statusLabel.text = [NSString stringWithFormat:@"内容太长，已复制前 %lu 字符（建议用「保存到文件」）", (unsigned long)cap];
+    } @catch (NSException *e) {
+        self.statusLabel.text = @"复制失败，请用「保存到文件」";
+    }
+}
+
+- (void)exportFile {
+    [self.bufLock lock];
+    NSString *snap = [self.buffer copy];
+    [self.bufLock unlock];
+
+    if (snap.length == 0) {
+        self.statusLabel.text = @"内容为空，先扫描";
+        return;
+    }
+
+    NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"MMdd_HHmmss";
+    NSString *name = [NSString stringWithFormat:@"scan_%@.txt", [df stringFromDate:[NSDate date]]];
+    NSString *path = [dir stringByAppendingPathComponent:name];
+
+    NSError *err = nil;
+    BOOL ok = [snap writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err];
+    if (ok) {
+        self.statusLabel.text = [NSString stringWithFormat:@"已保存 %@（%lu 字节）", name, (unsigned long)[snap lengthOfBytesUsingEncoding:NSUTF8StringEncoding]];
+        UIAlertController *ac = [UIAlertController
+            alertControllerWithTitle:@"已保存到 App 沙盒"
+                             message:[NSString stringWithFormat:@"文件名：%@\n\n打开「文件」App → 我的 iPhone → 沙盒扫描 → 找到这个文件\n\n路径：\n%@", name, path]
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault]];
+        [self presentViewController:ac animated:YES completion:nil];
+    } else {
+        self.statusLabel.text = [NSString stringWithFormat:@"保存失败：%@", err.localizedDescription];
+    }
 }
 
 // ========== 日志：只 append，节流刷新 UI ==========
@@ -235,7 +324,65 @@ static NSTimeInterval const kUIRefreshInterval = 0.25;
     [self dumpKeychain];
 
     [self log:@""];
+    [self log:@"========== 激活状态诊断 =========="];
+    [self diagnoseActivation:root];
+
+    [self log:@""];
     [self log:@"========== 完成 =========="];
+}
+
+- (void)diagnoseActivation:(NSString *)root {
+    if (!root) {
+        [self log:@"无容器路径，无法诊断"];
+        return;
+    }
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    NSArray *mustHave = @[@"Documents", @"Library"];
+    for (NSString *d in mustHave) {
+        NSString *p = [root stringByAppendingPathComponent:d];
+        BOOL isDir = NO;
+        BOOL e = [fm fileExistsAtPath:p isDirectory:&isDir];
+        [self log:@"%@ %@  (%@)", e ? @"✓" : @"✗", d, e ? (isDir ? @"目录" : @"文件") : @"不存在"];
+    }
+
+    NSArray *keyPaths = @[
+        @"Documents/private",
+        @"Documents/private/instance_ca_key.pem",
+        @"Documents/certs",
+        @"Documents/digitalkeys",
+        @"Documents/csr",
+        @"Documents/uap",
+        @"Library/Preferences/com.dfmc.dfpv.sapp.plist"
+    ];
+    NSInteger exist = 0;
+    for (NSString *rel in keyPaths) {
+        NSString *p = [root stringByAppendingPathComponent:rel];
+        BOOL e = [fm fileExistsAtPath:p];
+        if (e) exist++;
+        [self log:@"%@ %@", e ? @"✓" : @"✗", rel];
+    }
+
+    [self log:@""];
+    if (exist == 0) {
+        [self log:@"结论：该 App 从未激活过蓝牙钥匙"];
+        [self log:@"  → 没有任何密钥材料、证书、digitalkey 目录"];
+        [self log:@"  → 需要先在东风奕派里完成激活（车内 + 通电）"];
+    } else if (![fm fileExistsAtPath:[root stringByAppendingPathComponent:@"Documents/private"]] &&
+               ![fm fileExistsAtPath:[root stringByAppendingPathComponent:@"Documents/digitalkeys"]]) {
+        [self log:@"结论：有部分数据，但缺密钥目录"];
+        [self log:@"  → 可能激活流程未完成，或用的不是文件型密钥"];
+    } else {
+        [self log:@"结论：存在密钥相关目录，激活过"];
+    }
+
+    // 列出 App 顶层所有条目（帮助判断数据在哪）
+    [self log:@""];
+    [self log:@"容器顶层条目："];
+    NSArray *top = [fm contentsOfDirectoryAtPath:root error:NULL];
+    for (NSString *t in top) {
+        [self log:@"  %@", t];
+    }
 }
 
 - (NSString *)machineModel {
