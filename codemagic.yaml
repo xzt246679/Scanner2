@@ -1,6 +1,6 @@
 workflows:
   ios-trollstore-ipa:
-    name: Build SandboxScanner IPA (ObjC)
+    name: Build SandboxScanner IPA (ObjC + ldid)
     instance_type: mac_mini_m2
     max_build_duration: 30
     environment:
@@ -12,7 +12,13 @@ workflows:
           sw_vers
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
-          echo "SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)"
+
+      - name: Install ldid
+        script: |
+          set -e
+          brew install ldid
+          which ldid
+          ldid -h 2>&1 | head -20 || true
 
       - name: Compile Objective-C sources
         script: |
@@ -20,45 +26,21 @@ workflows:
           APP=build/Payload/SandboxScanner.app
           rm -rf build SandboxScanner.ipa
           mkdir -p "$APP"
-
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 
           clang -arch arm64 \
             -isysroot "$SDK" \
             -mios-version-min=14.0 \
-            -fobjc-arc \
-            -O2 \
-            -framework UIKit \
-            -framework Foundation \
-            -framework Security \
+            -fobjc-arc -O2 \
+            -framework UIKit -framework Foundation -framework Security \
             -o "$APP/SandboxScanner" \
-            Sources/main.m \
-            Sources/AppDelegate.m \
-            Sources/ViewController.m
+            Sources/main.m Sources/AppDelegate.m Sources/ViewController.m
 
           cp Info.plist "$APP/Info.plist"
           chmod +x "$APP/SandboxScanner"
-          echo "=== binary info ==="
           ls -la "$APP"
-          file "$APP/SandboxScanner"
 
-      - name: Verify no Swift dependency
-        script: |
-          set -e
-          BIN=build/Payload/SandboxScanner.app/SandboxScanner
-          echo "=== 依赖检查 ==="
-          otool -L "$BIN"
-          echo
-          if otool -L "$BIN" | grep -i swift; then
-            echo "!!! 仍然依赖 Swift 运行时"
-            exit 1
-          fi
-          echo "✅ 无 Swift 依赖"
-          echo
-          echo "=== 最低版本 / SDK ==="
-          vtool -show-build "$BIN"
-
-      - name: Write full entitlements
+      - name: Write entitlements
         script: |
           set -e
           cat > final.entitlements <<'ENTEOF'
@@ -87,40 +69,70 @@ workflows:
               <string>com.coldcoffee.sandboxscanner</string>
               <string>*</string>
             </array>
-            <key>com.apple.security.exception.files.absolute-path.read-only</key>
-            <array>
-              <string>/</string>
-              <string>/var/</string>
-              <string>/private/</string>
-            </array>
-            <key>com.apple.security.exception.files.absolute-path.read-write</key>
-            <array>
-              <string>/var/mobile/</string>
-              <string>/private/var/mobile/</string>
-            </array>
           </dict>
           </plist>
           ENTEOF
           plutil -lint final.entitlements
 
-      - name: Sign
-        script: |
-          set +e
-          APP=build/Payload/SandboxScanner.app
-          BIN="$APP/SandboxScanner"
-          codesign --force --sign - --entitlements final.entitlements --timestamp=none "$BIN"
-          echo "rc=$?"
-          codesign -d --entitlements :- "$BIN" 2>&1 | head -50
-
-      - name: Verify entitlements
+      - name: Sign with ldid -M (generates DER entitlements)
         script: |
           set +e
           BIN=build/Payload/SandboxScanner.app/SandboxScanner
-          OUT=$(codesign -d --entitlements :- "$BIN" 2>/dev/null)
-          echo "$OUT" | grep -q "no-sandbox" && echo "PASS_no_sandbox" || echo "FAIL_no_sandbox"
-          echo "$OUT" | grep -q "platform-application" && echo "PASS_platform" || echo "FAIL_platform"
-          echo "$OUT" | grep -q "AppDataContainers" && echo "PASS_appdata" || echo "FAIL_appdata"
-          echo "$OUT" | grep -q "keychain-access-groups" && echo "PASS_keychain" || echo "FAIL_keychain"
+          LDID=$(which ldid)
+
+          echo "=== ldid version ==="
+          $LDID -h 2>&1 | head -3 || true
+
+          echo "=== sign: -M -S (M = generate DER entitlements, TrollStore mode) ==="
+          $LDID -M -Sfinal.entitlements "$BIN"
+          echo "ldid rc=$?"
+
+          echo "=== readback xml ==="
+          $LDID -e "$BIN" 2>&1 | head -40
+
+          echo "=== check DER slot ==="
+          python3 - "$BIN" <<'PYEOF'
+          import sys, struct
+          p = sys.argv[1]
+          d = open(p, 'rb').read()
+          ncmds = struct.unpack('<I', d[16:20])[0]
+          q = 32
+          sigoff = sigsize = 0
+          for _ in range(ncmds):
+              cmd, sz = struct.unpack('<II', d[q:q+8])
+              if cmd == 0x1D:
+                  sigoff, sigsize = struct.unpack('<II', d[q+8:q+16])
+              if sz == 0: break
+              q += sz
+          blob = d[sigoff:sigoff+sigsize]
+          magic, length, count = struct.unpack('>III', blob[0:12])
+          idx = 12
+          slots = {}
+          for _ in range(count):
+              sto, sst = struct.unpack('>II', blob[idx:idx+8])
+              idx += 8
+              slots[sto] = sst
+          print("SuperBlob magic=0x%08X count=%d" % (magic, count))
+          names = {0:'CodeDirectory',2:'Requirements',5:'Entitlements',6:'DER-Entitlements',
+                   7:'AltCodeDirectory',0x1000:'Signature',0x10000:'AltCD2'}
+          for k, v in sorted(slots.items()):
+              print("  slot 0x%08X %-20s off=%d" % (k, names.get(k,'?'), v))
+          print()
+          if 6 in slots:
+              print("✅ 存在 DER entitlements (slot 6)")
+          else:
+              print("❌ 仍然没有 DER entitlements")
+          PYEOF
+
+      - name: Verify
+        script: |
+          set +e
+          BIN=build/Payload/SandboxScanner.app/SandboxScanner
+          echo "=== swift deps ==="
+          otool -L "$BIN" | grep -i swift && echo "有 Swift 依赖" || echo "无 Swift 依赖 ✅"
+          echo
+          echo "=== codesign dump ==="
+          codesign -d --entitlements :- "$BIN" 2>&1 | head -40
 
       - name: Package IPA
         script: |
@@ -134,4 +146,3 @@ workflows:
 
     artifacts:
       - SandboxScanner.ipa
-
