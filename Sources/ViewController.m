@@ -3,7 +3,7 @@
 #import <sys/utsname.h>
 
 static NSString *const kTargetBundle = @"com.dfmc.dfpv.sapp";
-static NSUInteger const kMaxDisplayLen = 200000;
+static NSUInteger const kMaxDisplayLen = 300000;
 
 @interface ViewController ()
 @property (nonatomic, strong) UITextView *textView;
@@ -12,7 +12,6 @@ static NSUInteger const kMaxDisplayLen = 200000;
 @property (nonatomic, strong) NSMutableString *buffer;
 @property (nonatomic, strong) NSLock *bufLock;
 @property (nonatomic, strong) NSString *root;
-@property (nonatomic, strong) NSString *currentFile;
 @property (nonatomic, assign) BOOL busy;
 @end
 
@@ -20,7 +19,7 @@ static NSUInteger const kMaxDisplayLen = 200000;
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"文件读取器";
+    self.title = @"情报提取器";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.buffer = [NSMutableString string];
     self.bufLock = [[NSLock alloc] init];
@@ -28,8 +27,8 @@ static NSUInteger const kMaxDisplayLen = 200000;
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
 
     UILabel *sl = [[UILabel alloc] init];
-    sl.text = @"已启动";
-    sl.font = [UIFont systemFontOfSize:12];
+    sl.text = @"已启动 · 每个按钮输出 2-4 千字符";
+    sl.font = [UIFont systemFontOfSize:11];
     sl.textAlignment = NSTextAlignmentCenter;
     sl.numberOfLines = 2;
     sl.translatesAutoresizingMaskIntoConstraints = NO;
@@ -37,7 +36,7 @@ static NSUInteger const kMaxDisplayLen = 200000;
     self.statusLabel = sl;
 
     UIScrollView *sv = [[UIScrollView alloc] init];
-    sv.showsHorizontalScrollIndicator = NO;
+    sv.showsHorizontalScrollIndicator = YES;
     sv.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:sv];
     self.buttonScroll = sv;
@@ -59,7 +58,7 @@ static NSUInteger const kMaxDisplayLen = 200000;
         [sv.topAnchor constraintEqualToAnchor:sl.bottomAnchor constant:6],
         [sv.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:4],
         [sv.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-4],
-        [sv.heightAnchor constraintEqualToConstant:44],
+        [sv.heightAnchor constraintEqualToConstant:48],
 
         [tv.topAnchor constraintEqualToAnchor:sv.bottomAnchor constant:6],
         [tv.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:4],
@@ -76,40 +75,40 @@ static NSUInteger const kMaxDisplayLen = 200000;
 }
 
 - (void)buildButtons {
-    // 5 个按钮，横排
     NSArray *titles = @[
-        @"① DK日志",
-        @"② 密钥日志",
-        @"③ 偏好设置",
-        @"④ 定位容器",
-        @"⑤ 全部"
+        @"①容器",
+        @"②密钥关键行",
+        @"③AUTO开关",
+        @"④偏好键名",
+        @"⑤DK关键行",
+        @"⑥证书信息"
     ];
-    SEL actions[5] = {
-        @selector(loadDKLog),
-        @selector(loadKeyLog),
-        @selector(loadPrefs),
-        @selector(findContainer),
-        @selector(loadAll)
+    SEL acts[6] = {
+        @selector(btnContainer),
+        @selector(btnKeyLog),
+        @selector(btnAutoPrefs),
+        @selector(btnAllKeys),
+        @selector(btnDKLog),
+        @selector(btnCerts)
     };
 
     CGFloat x = 4;
-    for (NSInteger i = 0; i < 5; i++) {
+    for (NSInteger i = 0; i < 6; i++) {
         UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
         [b setTitle:titles[i] forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont boldSystemFontOfSize:13];
-        b.tag = i;
-        [b addTarget:self action:actions[i] forControlEvents:UIControlEventTouchUpInside];
-        b.frame = CGRectMake(x, 4, 84, 36);
+        b.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+        [b addTarget:self action:acts[i] forControlEvents:UIControlEventTouchUpInside];
+        b.frame = CGRectMake(x, 4, 96, 38);
         b.layer.borderWidth = 1;
         b.layer.borderColor = [UIColor systemBlueColor].CGColor;
         b.layer.cornerRadius = 6;
         [self.buttonScroll addSubview:b];
-        x += 88;
+        x += 100;
     }
-    self.buttonScroll.contentSize = CGSizeMake(x, 44);
+    self.buttonScroll.contentSize = CGSizeMake(x, 48);
 }
 
-#pragma mark - 工具
+#pragma mark - 基础设施
 
 - (void)say:(NSString *)s {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -118,15 +117,13 @@ static NSUInteger const kMaxDisplayLen = 200000;
 }
 
 - (void)setContent:(NSString *)s {
+    NSString *t = s ?: @"";
     [self.bufLock lock];
-    [self.buffer setString:s ?: @""];
+    [self.buffer setString:t];
     [self.bufLock unlock];
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSString *show = s ?: @"";
-        if (show.length > kMaxDisplayLen) {
-            show = [show substringToIndex:kMaxDisplayLen];
-            show = [show stringByAppendingString:@"\n…(显示截断)"];
-        }
+        NSString *show = t;
+        if (show.length > kMaxDisplayLen) show = [show substringToIndex:kMaxDisplayLen];
         self.textView.text = show;
         [self.textView setContentOffset:CGPointMake(0, 0) animated:NO];
     });
@@ -136,13 +133,10 @@ static NSUInteger const kMaxDisplayLen = 200000;
     [self.bufLock lock];
     NSString *s = [self.buffer copy];
     [self.bufLock unlock];
-    if (s.length == 0) {
-        [self say:@"内容为空"];
-        return;
-    }
+    if (s.length == 0) { [self say:@"内容为空"]; return; }
     @try {
         [UIPasteboard generalPasteboard].string = s;
-        [self say:[NSString stringWithFormat:@"已复制 %lu 字符 · 发给我", (unsigned long)s.length]];
+        [self say:[NSString stringWithFormat:@"已复制 %lu 字符", (unsigned long)s.length]];
     } @catch (NSException *e) {
         [self say:@"复制失败"];
     }
@@ -163,24 +157,75 @@ static NSUInteger const kMaxDisplayLen = 200000;
     return nil;
 }
 
-#pragma mark - 按钮动作
+- (NSString *)readText:(NSString *)rel {
+    NSString *r = [self targetRoot];
+    if (!r) return nil;
+    NSString *full = [r stringByAppendingPathComponent:rel];
+    NSData *d = [NSData dataWithContentsOfFile:full options:0 error:NULL];
+    if (!d) return nil;
+    NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (s) return s;
+    // 非 UTF-8：抽取可打印
+    NSMutableString *out = [NSMutableString string];
+    const unsigned char *b = d.bytes;
+    NSMutableString *cur = [NSMutableString string];
+    for (NSUInteger i = 0; i < d.length && out.length < 200000; i++) {
+        unsigned char c = b[i];
+        if (c >= 32 && c < 127) {
+            [cur appendFormat:@"%c", c];
+        } else {
+            if (cur.length > 6) {
+                [out appendString:cur];
+                [out appendString:@"\n"];
+            }
+            [cur setString:@""];
+        }
+    }
+    if (cur.length > 6) [out appendString:cur];
+    return out;
+}
 
-- (void)findContainer {
+// 按关键词过滤行
+- (NSString *)grepLines:(NSString *)text keys:(NSArray *)keys maxLen:(NSUInteger)maxLen {
+    if (!text) return @"(读取失败)";
+    NSMutableString *out = [NSMutableString string];
+    NSArray *lines = [text componentsSeparatedByString:@"\n"];
+    NSInteger hit = 0;
+    NSInteger total = 0;
+    for (NSString *line in lines) {
+        if (line.length < 4) continue;
+        BOOL m = NO;
+        for (NSString *k in keys) {
+            if ([line rangeOfString:k options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                m = YES; break;
+            }
+        }
+        if (!m) continue;
+        total++;
+        if (out.length + line.length > maxLen) continue;
+        [out appendString:line];
+        [out appendString:@"\n"];
+        hit++;
+    }
+    NSString *hdr = [NSString stringWithFormat:@"匹配 %ld / 总 %ld 行（输出 %ld 行）\n\n",
+                     (long)total, (long)lines.count, (long)hit];
+    return [hdr stringByAppendingString:out];
+}
+
+#pragma mark - 按钮
+
+- (void)btnContainer {
     if (self.busy) return;
     self.busy = YES;
     [self say:@"定位中…"];
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSMutableString *o = [NSMutableString string];
+        [o appendFormat:@"target=%@\nuid=%d\nios=%@\nmodel=%@\n\n",
+            kTargetBundle, getuid(),
+            [[UIDevice currentDevice] systemVersion], [self machineModel]];
         NSString *r = [self targetRoot];
-        NSMutableString *out = [NSMutableString string];
-        [out appendFormat:@"target = %@\n", kTargetBundle];
-        [out appendFormat:@"uid    = %d\n", getuid()];
-        [out appendFormat:@"ios    = %@\n", [[UIDevice currentDevice] systemVersion]];
-        [out appendFormat:@"model  = %@\n", [self machineModel]];
-        [out appendFormat:@"home   = %@\n", NSHomeDirectory()];
-        [out appendString:@"\n"];
+        [o appendFormat:@"容器: %@\n\n", r ?: @"未找到"];
         if (r) {
-            [out appendFormat:@"✅ 容器: %@\n\n", r];
-            [out appendString:@"关键路径:\n"];
             NSArray *keys = @[
                 @"Documents/private",
                 @"Documents/private/instance_ca_key.pem",
@@ -191,156 +236,228 @@ static NSUInteger const kMaxDisplayLen = 200000;
                 @"Documents/dfssp.p12",
                 @"Documents/IngeekLogger",
                 @"Documents/VCKLog",
-                @"Library/PreferencePanes/IVCSBLEKey.plist"
+                @"Library/PreferencePanes/IVCSBLEKey.plist",
+                @"Library/Preferences/IngeekIdentity.plist"
             ];
             for (NSString *k in keys) {
-                BOOL e = [[NSFileManager defaultManager]
-                    fileExistsAtPath:[r stringByAppendingPathComponent:k]];
-                [out appendFormat:@"  %@ %@\n", e ? @"✓" : @"✗", k];
+                BOOL e = [[NSFileManager defaultManager] fileExistsAtPath:[r stringByAppendingPathComponent:k]];
+                [o appendFormat:@"%@ %@\n", e ? @"✓" : @"✗", k];
             }
-        } else {
-            [out appendString:@"❌ 未找到容器\n"];
         }
-        [self setContent:out];
+        [self setContent:o];
         [self say:@"定位完成"];
         self.busy = NO;
     });
 }
 
-- (void)loadDKLog {
-    [self loadFile:@"Documents/IngeekLogger/com.ingeek.dk.1.log" label:@"DK 日志"];
-}
-
-- (void)loadKeyLog {
-    [self loadFile:@"Documents/VCKLog/com.ics.secureKeyKit.log1.log" label:@"密钥日志"];
-}
-
-- (void)loadPrefs {
-    [self loadFile:@"Library/Preferences/com.dfmc.dfpv.sapp.plist" label:@"偏好设置"];
-}
-
-- (void)loadFile:(NSString *)rel label:(NSString *)label {
+- (void)btnKeyLog {
     if (self.busy) return;
-    NSString *root = [self targetRoot];
-    if (!root) {
-        [self say:@"先点④定位"];
-        return;
-    }
     self.busy = YES;
-    [self say:[NSString stringWithFormat:@"读取 %@…", label]];
-
+    [self say:@"过滤密钥日志…"];
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
-        NSString *full = [root stringByAppendingPathComponent:rel];
-        NSMutableString *out = [NSMutableString string];
-        [out appendFormat:@"===== %@ =====\n", rel];
+        NSString *t = [self readText:@"Documents/VCKLog/com.ics.secureKeyKit.log1.log"];
+        NSArray *keys = @[
+            @"signData", @"KeyTag", @"alias", @"SecKey", @"Keychain", @"keychain",
+            @"SecureEnclave", @"certificate", @"Certificate", @"digitalKey", @"DigitalKey",
+            @"activate", @"Activate", @"unlock", @"Unlock",
+            @"hubSecretKey", @"appId", @"Env:", @"authType",
+            @"Unexpected key", @"Invalid", @"error", @"Error",
+            @"BleService", @"ble", @"BLE", @"uuid", @"UUID",
+            @"RKE", @"rke", @"uri", @"service", @"characteristic",
+            @"connect", @"Connect", @"disconnect",
+            @"activateKey", @"localKey", @"getLocalKey", @"shareKey"
+        ];
+        NSString *res = [self grepLines:t keys:keys maxLen:5000];
+        [self setContent:res];
+        [self say:[NSString stringWithFormat:@"密钥日志 %lu 字符", (unsigned long)res.length]];
+        self.busy = NO;
+    });
+}
 
-        NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:full error:NULL];
-        if (!a) {
-            [out appendString:@"❌ 文件不存在\n"];
-            [self setContent:out];
-            [self say:@"不存在"];
-            self.busy = NO;
-            return;
-        }
-        unsigned long long sz = [a[NSFileSize] unsignedLongLongValue];
-        [out appendFormat:@"大小: %llu B\n\n", sz];
+- (void)btnDKLog {
+    if (self.busy) return;
+    self.busy = YES;
+    [self say:@"过滤 DK 日志…"];
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSString *t = [self readText:@"Documents/IngeekLogger/com.ingeek.dk.1.log"];
+        NSArray *keys = @[
+            @"Ble", @"BLE", @"ble", @"uuid", @"UUID", @"service", @"characteristic",
+            @"RKE", @"rke", @"uri", @"control", @"unlock", @"lock", @"Lock",
+            @"connect", @"Connect", @"disconnect", @"didConnect",
+            @"key", @"Key", @"alias", @"sign", @"Sign",
+            @"error", @"Error", @"code=", @"AUTO", @"insensible",
+            @"feature", @"Feature", @"standard", @"Standard", @"mtu", @"MTU",
+            @"approaching", @"Approaching", @"beacon", @"Beacon"
+        ];
+        NSString *res = [self grepLines:t keys:keys maxLen:5000];
+        [self setContent:res];
+        [self say:[NSString stringWithFormat:@"DK日志 %lu 字符", (unsigned long)res.length]];
+        self.busy = NO;
+    });
+}
 
-        NSData *d = [NSData dataWithContentsOfFile:full options:0 error:NULL];
+- (void)btnAutoPrefs {
+    if (self.busy) return;
+    self.busy = YES;
+    [self say:@"读偏好设置…"];
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSString *r = [self targetRoot];
+        NSString *full = [r stringByAppendingPathComponent:@"Library/Preferences/com.dfmc.dfpv.sapp.plist"];
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:full];
         if (!d) {
-            [out appendString:@"❌ 读取失败\n"];
-            [self setContent:out];
-            [self say:@"读取失败"];
+            [self setContent:@"(plist 读取失败)"];
+            [self say:@"失败"];
             self.busy = NO;
             return;
         }
+        NSMutableString *o = [NSMutableString string];
+        [o appendFormat:@"plist 共 %lu 个 key\n\n", (unsigned long)d.count];
 
-        NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-        if (s) {
-            [out appendString:s];
-        } else {
-            // 不是 UTF-8，输出可打印片段
-            [out appendString:@"[非 UTF-8，提取可打印片段]\n\n"];
-            const unsigned char *b = d.bytes;
-            NSMutableString *cur = [NSMutableString string];
-            NSUInteger maxOut = 150000;
-            for (NSUInteger i = 0; i < d.length && out.length < maxOut; i++) {
-                unsigned char c = b[i];
-                if (c >= 32 && c < 127) {
-                    [cur appendFormat:@"%c", c];
-                } else if (c == '\n' || c == '\r') {
-                    if (cur.length > 4) {
-                        [out appendString:cur];
-                        [out appendString:@"\n"];
+        // 先输出所有 AUTO/PE/UNLOCK/LOCK 相关
+        [o appendString:@"===== 自动解锁/闭锁相关 =====\n"];
+        NSMutableArray *matched = [NSMutableArray array];
+        for (NSString *k in d.allKeys) {
+            NSString *u = [k uppercaseString];
+            if ([u containsString:@"AUTO"] || [u containsString:@"UNLOCK"] ||
+                [u containsString:@"LOCK"] || [u containsString:@"PE_"] ||
+                [u containsString:@"APPROACH"] || [u containsString:@"INSENSIBLE"] ||
+                [u containsString:@"WELCOME"] || [u containsString:@"INTELLIGENT"] ||
+                [u containsString:@"DIGITALKEY"] || [u containsString:@"CARKEY"] ||
+                [u containsString:@"BLE"] || [u containsString:@"KEY"]) {
+                [matched addObject:k];
+            }
+        }
+        for (NSString *k in [matched sortedArrayUsingSelector:@selector(compare:)]) {
+            id v = d[k];
+            [o appendFormat:@"%@ = %@\n", k, [self shortDesc:v]];
+        }
+
+        [o appendString:@"\n===== 全部键名（仅名字）=====\n"];
+        NSInteger n = 0;
+        for (NSString *k in [[d allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+            [o appendFormat:@"%@\n", k];
+            if (++n > 400) { [o appendString:@"…(截断)\n"]; break; }
+        }
+
+        [self setContent:o];
+        [self say:[NSString stringWithFormat:@"偏好 %lu 键 · %lu 字符", (unsigned long)d.count, (unsigned long)o.length]];
+        self.busy = NO;
+    });
+}
+
+- (void)btnAllKeys {
+    if (self.busy) return;
+    self.busy = YES;
+    [self say:@"扫描 plist 键名…"];
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSString *r = [self targetRoot];
+        NSArray *plists = @[
+            @"Library/Preferences/com.dfmc.dfpv.sapp.plist",
+            @"Library/Preferences/IngeekIdentity.plist",
+            @"Library/PreferencePanes/IVCSBLEKey.plist",
+            @"Library/PreferencePanes/IVCSDigitalKeyEvents.plist",
+            @"Library/PreferencePanes/Account/IvcsAccountInfo.plist"
+        ];
+        NSMutableString *o = [NSMutableString string];
+        for (NSString *rel in plists) {
+            [o appendFormat:@"\n##### %@ #####\n", rel];
+            NSString *full = [r stringByAppendingPathComponent:rel];
+            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:full];
+            if (!d) { [o appendString:@"(不存在或读取失败)\n"]; continue; }
+            NSInteger n = 0;
+            for (NSString *k in [[d allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+                [o appendFormat:@"%@\n", k];
+                if (++n > 150) { [o appendString:@"…\n"]; break; }
+            }
+        }
+        [self setContent:o];
+        [self say:[NSString stringWithFormat:@"%lu 字符", (unsigned long)o.length]];
+        self.busy = NO;
+    });
+}
+
+- (void)btnCerts {
+    if (self.busy) return;
+    self.busy = YES;
+    [self say:@"检查证书…"];
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSString *r = [self targetRoot];
+        NSMutableString *o = [NSMutableString string];
+        NSArray *files = @[
+            @"Documents/dfssp.p12",
+            @"Documents/certs",
+            @"Documents/private",
+            @"Documents/digitalkeys"
+        ];
+        for (NSString *rel in files) {
+            NSString *full = [r stringByAppendingPathComponent:rel];
+            BOOL isDir = NO;
+            BOOL e = [[NSFileManager defaultManager] fileExistsAtPath:full isDirectory:&isDir];
+            [o appendFormat:@"\n%@ %@ (%@)\n", e ? @"✓" : @"✗", rel, isDir ? @"目录" : @"文件"];
+            if (!e) continue;
+            if (isDir) {
+                NSArray *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:full error:NULL];
+                for (NSString *it in items) {
+                    NSDictionary *a = [[NSFileManager defaultManager]
+                        attributesOfItemAtPath:[full stringByAppendingPathComponent:it] error:NULL];
+                    [o appendFormat:@"   %@ (%llu B)\n", it, [a[NSFileSize] unsignedLongLongValue]];
+                }
+            } else {
+                NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:full error:NULL];
+                [o appendFormat:@"   大小 %llu B\n", [a[NSFileSize] unsignedLongLongValue]];
+                NSData *d = [NSData dataWithContentsOfFile:full options:0 error:NULL];
+                if (d && d.length > 0) {
+                    NSMutableString *hex = [NSMutableString string];
+                    NSUInteger n = MIN((NSUInteger)32, d.length);
+                    const unsigned char *b = d.bytes;
+                    for (NSUInteger i = 0; i < n; i++) [hex appendFormat:@"%02x", b[i]];
+                    [o appendFormat:@"   头部: %@\n", hex];
+                    if (d.length > 4) {
+                        const unsigned char *bb = d.bytes;
+                        [o appendFormat:@"   魔数: %02x%02x%02x%02x\n", bb[0], bb[1], bb[2], bb[3]];
                     }
-                    [cur setString:@""];
-                } else {
-                    if (cur.length > 4) {
-                        [out appendString:cur];
-                        [out appendString:@"\n"];
-                    }
-                    [cur setString:@""];
                 }
             }
-            if (cur.length > 4) [out appendString:cur];
         }
 
-        [self setContent:out];
-        [self say:[NSString stringWithFormat:@"%@ · %lu 字符 · 点复制", label, (unsigned long)out.length]];
+        // Keychain
+        [o appendString:@"\n##### Keychain #####\n"];
+        NSDictionary *q = @{
+            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecReturnAttributes: @YES,
+            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll
+        };
+        CFTypeRef res = NULL;
+        OSStatus st = SecItemCopyMatching((__bridge CFDictionaryRef)q, &res);
+        [o appendFormat:@"status=%d\n", (int)st];
+        if (st == errSecSuccess && res) {
+            NSArray *arr = (__bridge_transfer NSArray *)res;
+            for (NSDictionary *it in arr) {
+                [o appendFormat:@"  svc=%@ acct=%@\n",
+                    it[(__bridge id)kSecAttrService] ?: @"-",
+                    it[(__bridge id)kSecAttrAccount] ?: @"-"];
+            }
+        } else if (res) {
+            CFRelease(res);
+        }
+
+        [self setContent:o];
+        [self say:[NSString stringWithFormat:@"证书 %lu 字符", (unsigned long)o.length]];
         self.busy = NO;
     });
 }
 
-- (void)loadAll {
-    if (self.busy) return;
-    NSString *root = [self targetRoot];
-    if (!root) {
-        [self say:@"先点④定位"];
-        return;
+- (NSString *)shortDesc:(id)v {
+    if (!v) return @"(null)";
+    if ([v isKindOfClass:[NSString class]]) {
+        NSString *s = v;
+        return s.length > 120 ? [NSString stringWithFormat:@"%@…(%lu字符)", [s substringToIndex:120], (unsigned long)s.length] : s;
     }
-    self.busy = YES;
-    [self say:@"读取全部关键文件…"];
-
-    dispatch_async(dispatch_get_global_queue(0, 0), ^{
-        NSMutableString *out = [NSMutableString string];
-        [out appendFormat:@"target=%@\nuid=%d\nios=%@\nmodel=%@\n\n",
-            kTargetBundle, getuid(),
-            [[UIDevice currentDevice] systemVersion], [self machineModel]];
-
-        NSArray *files = @[
-            @"Library/PreferencePanes/IVCSBLEKey.plist",
-            @"Library/Preferences/IngeekIdentity.plist",
-            @"Documents/IngeekLogger/com.ingeek.dk.1.log",
-            @"Documents/VCKLog/com.ics.secureKeyKit.log1.log"
-        ];
-
-        for (NSString *rel in files) {
-            [out appendFormat:@"\n\n########## %@ ##########\n", rel];
-            NSString *full = [root stringByAppendingPathComponent:rel];
-            NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:full error:NULL];
-            if (!a) {
-                [out appendString:@"(不存在)\n"];
-                continue;
-            }
-            unsigned long long sz = [a[NSFileSize] unsignedLongLongValue];
-            if (sz > 60000) {
-                [out appendFormat:@"(跳过: %llu B 太大，请单独点按钮)\n", sz];
-                continue;
-            }
-            NSData *d = [NSData dataWithContentsOfFile:full options:0 error:NULL];
-            if (!d) { [out appendString:@"(读取失败)\n"]; continue; }
-            NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-            if (s) {
-                [out appendString:s];
-            } else {
-                [out appendFormat:@"(二进制 %llu B)\n", sz];
-            }
-            [self setContent:out];
-        }
-
-        [self setContent:out];
-        [self say:[NSString stringWithFormat:@"共 %lu 字符 · 点复制", (unsigned long)out.length]];
-        self.busy = NO;
-    });
+    if ([v isKindOfClass:[NSNumber class]]) return [v stringValue];
+    if ([v isKindOfClass:[NSData class]]) return [NSString stringWithFormat:@"<data %lu B>", (unsigned long)[v length]];
+    if ([v isKindOfClass:[NSArray class]]) return [NSString stringWithFormat:@"<array %lu>", (unsigned long)[v count]];
+    if ([v isKindOfClass:[NSDictionary class]]) return [NSString stringWithFormat:@"<dict %lu>", (unsigned long)[v count]];
+    return [v description];
 }
 
 - (NSString *)machineModel {
@@ -350,4 +467,3 @@ static NSUInteger const kMaxDisplayLen = 200000;
 }
 
 @end
-
