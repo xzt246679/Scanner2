@@ -1,5 +1,5 @@
 workflows:
-  ios-bletester:
+  ios-bletester-v5:
     name: Build BleTester IPA
     instance_type: mac_mini_m2
     max_build_duration: 30
@@ -9,8 +9,8 @@ workflows:
       - name: Compile
         script: |
           set +e
-          APP=build/Payload/BleTester.app
-          rm -rf build BleTester.ipa compile-bt.log
+          APP=build/Payload/BleTesterV5.app
+          rm -rf build BleTesterV5.ipa compile-bt.log
           mkdir -p "$APP"
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 
@@ -56,19 +56,19 @@ workflows:
         script: |
           set +e
           codesign --force --sign - --entitlements bt.entitlements --timestamp=none \
-            build/Payload/BleTester.app/BleTester
+            build/Payload/BleTesterV5.app/BleTester
           echo "rc=$?"
 
       - name: Package
         script: |
           set -e
           cd build
-          zip -qry ../BleTester.ipa Payload
+          zip -qry ../BleTesterV5.ipa Payload
           cd ..
-          ls -la BleTester.ipa
+          ls -la BleTesterV5.ipa
 
     artifacts:
-      - BleTester.ipa
+      - BleTesterV5.ipa
       - compile-bt.log
 
   ios-trollstore-ipa:
@@ -145,4 +145,6 @@ workflows:
     artifacts:
       - SandboxScanner.ipa
       - compile.log
+
+
 
