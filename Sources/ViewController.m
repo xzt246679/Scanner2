@@ -1,18 +1,134 @@
 #import "ViewController.h"
 #import <Security/Security.h>
 #import <sys/utsname.h>
-#import <dlfcn.h>
-#import <objc/message.h>
-#import <objc/runtime.h>
+#import <zlib.h>
 
 static NSString *const kTargetBundle = @"com.dfmc.dfpv.sapp";
 static NSUInteger const kMaxBufferLen = 400000;
 static NSUInteger const kMaxDisplayLen = 12000;
 static NSTimeInterval const kUIRefreshInterval = 0.25;
+static unsigned long long const kMaxSingleFile = 32ULL * 1024 * 1024;
+static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024;
 
-// 导出限制
-static unsigned long long const kMaxSingleFile = 32ULL * 1024 * 1024;   // 单文件 32MB
-static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024; // 总计 200MB
+#pragma mark - 最小 ZIP 写入器（store 模式，不压缩）
+
+typedef struct {
+    uint32_t sig;
+    uint16_t ver, flags, method, mtime, mdate;
+    uint32_t crc, csize, usize;
+    uint16_t nlen, elen;
+} ZipLocalHdr;
+
+typedef struct {
+    uint32_t sig;
+    uint16_t vmade, vneed, flags, method, mtime, mdate;
+    uint32_t crc, csize, usize;
+    uint16_t nlen, elen, clen;
+    uint16_t disk, iattr;
+    uint32_t eattr, offset;
+} ZipCentralHdr;
+
+typedef struct {
+    uint32_t sig;
+    uint16_t disk, cddisk, nthis, ntotal;
+    uint32_t cdsize, cdoff;
+    uint16_t clen;
+} ZipEndRec;
+
+@interface SimpleZip : NSObject
+@property (nonatomic, strong) NSMutableData *central;
+@property (nonatomic, strong) NSFileHandle *fh;
+@property (nonatomic, assign) unsigned long long offset;
+@property (nonatomic, assign) NSInteger count;
+@end
+
+@implementation SimpleZip
+
+- (instancetype)initWithPath:(NSString *)path {
+    if ((self = [super init])) {
+        [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+        _fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        _central = [NSMutableData data];
+        _offset = 0;
+        _count = 0;
+        if (!_fh) return nil;
+    }
+    return self;
+}
+
+- (BOOL)addFile:(NSString *)src name:(NSString *)name {
+    NSData *data = [NSData dataWithContentsOfFile:src options:NSDataReadingMappedIfSafe error:NULL];
+    if (!data) return NO;
+    if (data.length > 0xFFFFFFFFULL) return NO;
+
+    NSData *nameData = [name dataUsingEncoding:NSUTF8StringEncoding];
+    uint32_t crc = (uint32_t)crc32(0L, data.bytes, (uInt)data.length);
+    uint32_t sz = (uint32_t)data.length;
+
+    ZipLocalHdr h = {0};
+    h.sig = 0x04034b50;
+    h.ver = 20;
+    h.flags = 0x0800;      // UTF-8 文件名
+    h.method = 0;          // store
+    h.mtime = 0;
+    h.mdate = 0x21;        // 1980-01-01 合法值
+    h.crc = crc;
+    h.csize = sz;
+    h.usize = sz;
+    h.nlen = (uint16_t)nameData.length;
+    h.elen = 0;
+
+    @try {
+        [self.fh writeData:[NSData dataWithBytes:&h length:sizeof(h)]];
+        [self.fh writeData:nameData];
+        if (sz > 0) [self.fh writeData:data];
+    } @catch (NSException *e) {
+        return NO;
+    }
+
+    ZipCentralHdr c = {0};
+    c.sig = 0x02014b50;
+    c.vmade = 20;
+    c.vneed = 20;
+    c.flags = 0x0800;
+    c.method = 0;
+    c.mdate = 0x21;
+    c.crc = crc;
+    c.csize = sz;
+    c.usize = sz;
+    c.nlen = (uint16_t)nameData.length;
+    c.offset = (uint32_t)self.offset;
+
+    [self.central appendBytes:&c length:sizeof(c)];
+    [self.central appendData:nameData];
+
+    self.offset += sizeof(h) + nameData.length + sz;
+    self.count++;
+    return YES;
+}
+
+- (BOOL)finish {
+    @try {
+        unsigned long long cdOff = self.offset;
+        [self.fh writeData:self.central];
+
+        ZipEndRec e = {0};
+        e.sig = 0x06054b50;
+        e.nthis = (uint16_t)self.count;
+        e.ntotal = (uint16_t)self.count;
+        e.cdsize = (uint32_t)self.central.length;
+        e.cdoff = (uint32_t)cdOff;
+        [self.fh writeData:[NSData dataWithBytes:&e length:sizeof(e)]];
+        [self.fh closeFile];
+        return YES;
+    } @catch (NSException *ex) {
+        return NO;
+    }
+}
+
+@end
+
+#pragma mark - VC
 
 @interface ViewController ()
 @property (nonatomic, strong) UITextView *textView;
@@ -31,8 +147,6 @@ static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024; // 总�
 @end
 
 @implementation ViewController
-
-#pragma mark - UI
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -62,7 +176,7 @@ static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024; // 总�
     self.scanButton = scan;
 
     UIButton *exp = [UIButton buttonWithType:UIButtonTypeSystem];
-    [exp setTitle:@"② 导出文件" forState:UIControlStateNormal];
+    [exp setTitle:@"② 导出 ZIP" forState:UIControlStateNormal];
     exp.titleLabel.font = [UIFont boldSystemFontOfSize:16];
     [exp addTarget:self action:@selector(runExport) forControlEvents:UIControlEventTouchUpInside];
     exp.translatesAutoresizingMaskIntoConstraints = NO;
@@ -82,15 +196,12 @@ static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024; // 总�
         [sl.topAnchor constraintEqualToAnchor:safe.topAnchor constant:4],
         [sl.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:8],
         [sl.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-8],
-
         [scan.topAnchor constraintEqualToAnchor:sl.bottomAnchor constant:6],
         [scan.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
         [scan.heightAnchor constraintEqualToConstant:40],
-
         [exp.topAnchor constraintEqualToAnchor:sl.bottomAnchor constant:6],
         [exp.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
         [exp.heightAnchor constraintEqualToConstant:40],
-
         [tv.topAnchor constraintEqualToAnchor:scan.bottomAnchor constant:6],
         [tv.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:4],
         [tv.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-4],
@@ -110,8 +221,6 @@ static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024; // 总�
     self.textView.text = @"";
     self.statusLabel.text = @"已清空";
 }
-
-#pragma mark - 日志
 
 - (void)logRaw:(NSString *)s {
     if (self.aborted) return;
@@ -169,8 +278,6 @@ static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024; // 总�
     });
 }
 
-#pragma mark - 动作
-
 - (void)runScan {
     self.aborted = NO;
     self.fileVisits = 0;
@@ -209,11 +316,12 @@ static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024; // 总�
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         __strong typeof(weakSelf) s = weakSelf;
         if (!s) return;
-        @try { [s exportAll]; }
-        @catch (NSException *e) { [s log:@"!!! %@ - %@", e.name, e.reason]; }
-        NSString *msg = [NSString stringWithFormat:@"导出 %ld 个文件 / %.1f MB",
-                         (long)s.exportedCount, s.exportedBytes / 1048576.0];
-        [s finishUI:msg];
+        @try {
+            [s exportAllSafe];
+        } @catch (NSException *e) {
+            [s log:@"!!! 异常 %@ - %@", e.name, e.reason];
+        }
+        [s finishUI:[NSString stringWithFormat:@"完成 · %ld 文件", (long)s.exportedCount]];
     });
 }
 
@@ -234,204 +342,200 @@ static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024; // 总�
 
 - (BOOL)shouldExport:(NSString *)name {
     NSString *l = [name lowercaseString];
-    // 排除资源
     if ([l hasSuffix:@".png"] || [l hasSuffix:@".jpg"] || [l hasSuffix:@".jpeg"] ||
         [l hasSuffix:@".gif"] || [l hasSuffix:@".svg"] || [l hasSuffix:@".pdf"] ||
         [l hasSuffix:@".ttf"] || [l hasSuffix:@".otf"] || [l hasSuffix:@".car"] ||
         [l hasSuffix:@".mp3"] || [l hasSuffix:@".mp4"] || [l hasSuffix:@".lottie"] ||
-        [l hasSuffix:@".ktx"] || [l hasSuffix:@".metallib"] || [l hasSuffix:@".jsbundle"]) {
+        [l hasSuffix:@".ktx"] || [l hasSuffix:@".metallib"] || [l hasSuffix:@".jsbundle"] ||
+        [l hasSuffix:@".so"] || [l hasSuffix:@".dylib"] || [l hasSuffix:@".nib"]) {
         return NO;
     }
-    // 包含这些扩展：日志/配置/数据库/证书/归档
     NSArray *allow = @[@".log", @".plist", @".sqlite", @".db", @".db3", @".p12", @".der",
                        @".pem", @".json", @".archiver", @".txt", @".xml", @".key",
-                       @".cer", @".crt", @".-wal", @".-shm", @".manifest", @".data"];
+                       @".cer", @".crt", @".manifest", @".data", @".c11", @".dk"];
     for (NSString *e in allow) {
         if ([l hasSuffix:e]) return YES;
     }
-    // wal/shm 特判
     if ([l hasSuffix:@"-wal"] || [l hasSuffix:@"-shm"]) return YES;
     return NO;
 }
 
-- (void)exportAll {
+- (void)exportAllSafe {
+    [self log:@"=== 阶段1: 定位容器 ==="];
     NSString *root = [self targetRoot];
     if (!root) {
         [self log:@"❌ 未找到目标容器"];
         return;
     }
-    [self log:@"目标: %@", root];
-    [self log:@"App 沙盒: %@", NSHomeDirectory()];
+    [self log:@"✅ %@", root];
 
-    NSString *destRoot = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/export"];
-    NSFileManager *fm = [NSFileManager defaultManager];
-
-    if ([fm fileExistsAtPath:destRoot]) {
-        [fm removeItemAtPath:destRoot error:NULL];
+    [self log:@""];
+    [self log:@"=== 阶段2: 收集文件列表 ==="];
+    NSMutableArray *files = [NSMutableArray array];   // 存相对路径
+    @try {
+        [self collectFiles:root base:root rel:@"" depth:0 maxDepth:6 into:files];
+    } @catch (NSException *e) {
+        [self log:@"收集异常: %@", e.reason];
     }
-    [fm createDirectoryAtPath:destRoot withIntermediateDirectories:YES attributes:nil error:NULL];
+    [self log:@"收集到 %lu 个候选文件", (unsigned long)files.count];
 
-    [self log:@"输出: %@", destRoot];
+    if (files.count == 0) {
+        [self log:@"❌ 没有可导出文件"];
+        return;
+    }
+
     [self log:@""];
+    [self log:@"=== 阶段3: 写 ZIP ==="];
+    NSString *zipPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/export.zip"];
+    [[NSFileManager defaultManager] removeItemAtPath:zipPath error:NULL];
 
-    [self copyTree:root dest:destRoot rel:@"" depth:0 maxDepth:6];
+    SimpleZip *z = [[SimpleZip alloc] initWithPath:zipPath];
+    if (!z) {
+        [self log:@"❌ 无法创建 zip 文件"];
+        return;
+    }
 
-    [self log:@""];
-    [self log:@"========== 导出完成 =========="];
-    [self log:@"文件数: %ld", (long)self.exportedCount];
-    [self log:@"总大小: %.2f MB", self.exportedBytes / 1048576.0];
+    NSInteger okCount = 0;
+    NSInteger skipCount = 0;
+    NSUInteger idx = 0;
+    for (NSString *rel in files) {
+        if (self.aborted) break;
+        idx++;
+        NSString *src = [root stringByAppendingPathComponent:rel];
+        NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:src error:NULL];
+        if (!a) { skipCount++; continue; }
+        unsigned long long sz = [a[NSFileSize] unsignedLongLongValue];
+        if (sz == 0 || sz > kMaxSingleFile) { skipCount++; continue; }
+        if (self.exportedBytes + sz > kMaxTotalExport) {
+            [self log:@"已达 200MB 上限"];
+            break;
+        }
 
-    // 写清单
-    NSString *idx = [destRoot stringByAppendingPathComponent:@"_index.txt"];
+        BOOL ok = NO;
+        @try {
+            ok = [z addFile:src name:rel];
+        } @catch (NSException *e) {
+            ok = NO;
+        }
+
+        if (ok) {
+            okCount++;
+            self.exportedBytes += sz;
+            [self.exportLog addObject:[NSString stringWithFormat:@"%10llu  %@", sz, rel]];
+            if (idx % 5 == 0 || sz > 100000) {
+                [self log:@"✓ %@ (%llu B)", rel, sz];
+            }
+        } else {
+            skipCount++;
+        }
+    }
+
+    // 写入清单
     NSString *misc = [NSString stringWithFormat:
-        @"target=%s\nuid=%d\nios=%@\nmodel=%@\nfiles=%ld\nbytes=%llu\n\n%@",
-        kTargetBundle.UTF8String, getuid(),
+        @"target=%@\nuid=%d\nios=%@\nmodel=%@\nfiles=%ld\nbytes=%llu\n\n%@",
+        kTargetBundle, getuid(),
         [[UIDevice currentDevice] systemVersion], [self machineModel],
-        (long)self.exportedCount, self.exportedBytes,
+        (long)okCount, self.exportedBytes,
         [self.exportLog componentsJoinedByString:@"\n"]];
-    [misc writeToFile:idx atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    NSString *idxTmp = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/_index.txt"];
+    [misc writeToFile:idxTmp atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    @try {
+        [z addFile:idxTmp name:@"_index.txt"];
+    } @catch (NSException *e) { }
+
+    BOOL fin = NO;
+    @try {
+        fin = [z finish];
+    } @catch (NSException *e) {
+        fin = NO;
+    }
+
+    self.exportedCount = okCount;
+    [self log:@""];
+    [self log:@"=== 阶段4: 完成 ==="];
+    [self log:@"写入 %ld 个文件，跳过 %ld 个", (long)okCount, (long)skipCount];
+    [self log:@"总大小 %.2f MB", self.exportedBytes / 1048576.0];
+    [self log:@"zip 结束: %@", fin ? @"成功" : @"失败"];
+
+    NSDictionary *za = [[NSFileManager defaultManager] attributesOfItemAtPath:zipPath error:NULL];
+    unsigned long long zsz = za ? [za[NSFileSize] unsignedLongLongValue] : 0;
+    [self log:@"zip 文件: %.2f MB", zsz / 1048576.0];
+    [self log:@"路径: %@", zipPath];
+
+    if (zsz == 0) {
+        [self log:@"❌ zip 为空"];
+        return;
+    }
 
     [self log:@""];
-    [self log:@"正在打包 zip…"];
-    NSString *zipPath = [self makeZipFrom:destRoot];
-    if (zipPath) {
-        NSDictionary *za = [fm attributesOfItemAtPath:zipPath error:NULL];
-        unsigned long long zsz = [za[NSFileSize] unsignedLongLongValue];
-        [self log:@"✅ zip: %@ (%.2f MB)", [zipPath lastPathComponent], zsz / 1048576.0];
-        [self log:@""];
-        [self log:@"即将弹出分享菜单 → 选「微信」发给文件传输助手"];
-
-        dispatch_async(dispatch_get_main_queue(), ^{
+    [self log:@"=== 阶段5: 弹出分享 ==="];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
             [self shareFile:zipPath];
-        });
-    } else {
-        [self log:@"❌ zip 打包失败"];
-        [self log:@"改为：打开「文件」App → 我的 iPhone → 沙盒扫描 → export"];
-    }
+        } @catch (NSException *e) {
+            self.statusLabel.text = [NSString stringWithFormat:@"分享异常: %@", e.reason];
+        }
+    });
 }
 
-- (NSString *)makeZipFrom:(NSString *)dir {
-    NSURL *dirURL = [NSURL fileURLWithPath:dir];
-    NSFileCoordinator *coord = [[NSFileCoordinator alloc] init];
-    NSError *err = nil;
-    __block BOOL ok = NO;
-    NSString *dst = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/export.zip"];
-    [[NSFileManager defaultManager] removeItemAtPath:dst error:NULL];
+- (void)collectFiles:(NSString *)path base:(NSString *)base rel:(NSString *)rel
+               depth:(NSInteger)depth maxDepth:(NSInteger)maxDepth into:(NSMutableArray *)out {
+    if (depth > maxDepth || self.aborted) return;
+    if (++self.fileVisits > 20000) return;
 
-    [coord coordinateReadingItemAtURL:dirURL
-                              options:NSFileCoordinatorReadingForUploading
-                                error:&err
-                           byAccessor:^(NSURL *newURL) {
-        NSError *e2 = nil;
-        ok = [[NSFileManager defaultManager] copyItemAtURL:newURL
-                                                     toURL:[NSURL fileURLWithPath:dst]
-                                                     error:&e2];
-        if (!ok) {
-            [self log:@"copy zip 失败: %@", e2.localizedDescription];
+    NSArray *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:NULL];
+    if (!items) return;
+
+    for (NSString *name in items) {
+        NSString *full = [path stringByAppendingPathComponent:name];
+        NSString *relFull = rel.length ? [rel stringByAppendingPathComponent:name] : name;
+
+        BOOL isDir = NO;
+        if (![[NSFileManager defaultManager] fileExistsAtPath:full isDirectory:&isDir]) continue;
+
+        if (isDir) {
+            [self collectFiles:full base:base rel:relFull depth:depth + 1 maxDepth:maxDepth into:out];
+        } else if ([self shouldExport:name]) {
+            [out addObject:relFull];
         }
-    }];
-
-    if (err) {
-        [self log:@"coordinator 错误: %@", err.localizedDescription];
     }
-    return ok ? dst : nil;
 }
 
 - (void)shareFile:(NSString *)path {
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        self.statusLabel.text = @"zip 不存在";
+        return;
+    }
     NSURL *url = [NSURL fileURLWithPath:path];
     UIActivityViewController *avc =
         [[UIActivityViewController alloc] initWithActivityItems:@[url] applicationActivities:nil];
 
-    // iPad 需要 popover
-    if ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) {
+    if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
         avc.popoverPresentationController.sourceView = self.view;
         avc.popoverPresentationController.sourceRect =
             CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 1, 1);
     }
     avc.completionWithItemsHandler = ^(UIActivityType t, BOOL done, NSArray *items, NSError *e) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (done) {
-                self.statusLabel.text = @"已分享";
-            } else {
-                self.statusLabel.text = @"已取消分享（文件仍在 Documents/export.zip）";
-            }
+            self.statusLabel.text = done ? @"已分享" : @"已取消（zip 仍在 Documents/）";
         });
     };
     [self presentViewController:avc animated:YES completion:nil];
 }
 
-- (void)copyTree:(NSString *)src dest:(NSString *)dest rel:(NSString *)rel
-           depth:(NSInteger)depth maxDepth:(NSInteger)maxDepth {
-    if (depth > maxDepth || self.aborted) return;
-    if (self.exportedBytes > kMaxTotalExport) {
-        if (!self.aborted) {
-            [self log:@"!!! 已达 200MB 上限，停止"];
-        }
-        return;
-    }
-
-    NSArray *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:src error:NULL];
-    if (!items) {
-        [self log:@"[不可读] %@", rel];
-        return;
-    }
-
-    for (NSString *name in items) {
-        if (self.aborted) return;
-        if (++self.fileVisits > 20000) {
-            [self log:@"!!! 遍历上限"];
-            return;
-        }
-        NSString *srcFull = [src stringByAppendingPathComponent:name];
-        NSString *relFull = rel.length ? [rel stringByAppendingPathComponent:name] : name;
-
-        BOOL isDir = NO;
-        if (![[NSFileManager defaultManager] fileExistsAtPath:srcFull isDirectory:&isDir]) continue;
-
-        if (isDir) {
-            [self copyTree:srcFull dest:dest rel:relFull depth:depth + 1 maxDepth:maxDepth];
-            continue;
-        }
-
-        if (![self shouldExport:name]) continue;
-
-        NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:srcFull error:NULL];
-        unsigned long long sz = [attrs[NSFileSize] unsignedLongLongValue];
-        if (sz == 0 || sz > kMaxSingleFile) {
-            [self log:@"[跳过 %@] %llu B", relFull, sz];
-            continue;
-        }
-
-        NSString *destFull = [dest stringByAppendingPathComponent:relFull];
-        NSString *destDir = [destFull stringByDeletingLastPathComponent];
-        [[NSFileManager defaultManager] createDirectoryAtPath:destDir
-                                  withIntermediateDirectories:YES attributes:nil error:NULL];
-
-        NSError *err = nil;
-        BOOL ok = [[NSFileManager defaultManager] copyItemAtPath:srcFull toPath:destFull error:&err];
-        if (ok) {
-            self.exportedCount++;
-            self.exportedBytes += sz;
-            [self.exportLog addObject:[NSString stringWithFormat:@"%10llu  %@", sz, relFull]];
-            [self log:@"✓ %@ (%llu B)", relFull, sz];
-        } else {
-            [self log:@"✗ %@ : %@", relFull, err.localizedDescription];
-        }
-    }
-}
-
-#pragma mark - 扫描（保留）
+#pragma mark - 扫描
 
 - (void)scanAll {
     [self log:@"========== 环境 =========="];
     [self log:@"uid=%d euid=%d", getuid(), geteuid()];
     [self log:@"ios=%@ model=%@", [[UIDevice currentDevice] systemVersion], [self machineModel]];
+    [self log:@"home=%@", NSHomeDirectory()];
 
     [self log:@""];
     [self log:@"========== 定位 =========="];
     NSString *root = [self targetRoot];
     if (!root) {
-        [self log:@"❌ 未找到 %@", kTargetBundle];
+        [self log:@"❌ 未找到"];
         return;
     }
     [self log:@"✅ %@", root];
@@ -455,27 +559,21 @@ static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024; // 总�
         @"Library/Preferences/com.dfmc.dfpv.sapp.plist"
     ];
     for (NSString *k in keys) {
-        NSString *p = [root stringByAppendingPathComponent:k];
-        BOOL e = [[NSFileManager defaultManager] fileExistsAtPath:p];
+        BOOL e = [[NSFileManager defaultManager] fileExistsAtPath:[root stringByAppendingPathComponent:k]];
         [self log:@"%@ %@", e ? @"✓" : @"✗", k];
     }
 
     [self log:@""];
-    [self log:@"========== 日志文件大小 =========="];
+    [self log:@"========== 日志大小 =========="];
     NSArray *logs = @[
         @"Documents/IngeekLogger/com.ingeek.dk.1.log",
         @"Documents/VCKLog/com.ics.secureKeyKit.log1.log",
-        @"Documents/IVCS/IVCS-2026-11-22.log",
         @"Documents/2026-11-22.log"
     ];
     for (NSString *l in logs) {
-        NSString *p = [root stringByAppendingPathComponent:l];
-        NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:NULL];
-        if (a) {
-            [self log:@"  %@ : %llu B", l, [a[NSFileSize] unsignedLongLongValue]];
-        } else {
-            [self log:@"  %@ : 不存在", l];
-        }
+        NSDictionary *a = [[NSFileManager defaultManager]
+            attributesOfItemAtPath:[root stringByAppendingPathComponent:l] error:NULL];
+        [self log:@"  %@ : %@", l, a ? [NSString stringWithFormat:@"%llu B", [a[NSFileSize] unsignedLongLongValue]] : @"不存在"];
     }
 
     [self log:@""];
@@ -498,8 +596,7 @@ static unsigned long long const kMaxTotalExport = 200ULL * 1024 * 1024; // 总�
     }
 
     [self log:@""];
-    [self log:@"========== 完成 =========="];
-    [self log:@"下一步：点「② 导出文件」"];
+    [self log:@"下一步：点「② 导出 ZIP」"];
 }
 
 - (NSString *)machineModel {
