@@ -160,6 +160,41 @@ static NSString *const kPrefRel = @"Library/Preferences/com.dfmc.dfpv.sapp.plist
     return [NSDictionary dictionaryWithContentsOfFile:[r stringByAppendingPathComponent:kPrefRel]];
 }
 
+// 找出 Documents 下所有 .log，按修改时间倒序（最新在前）
+- (NSArray *)sortedLogFiles {
+    NSString *r = [self targetRoot];
+    if (!r) return @[];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *docsDir = [r stringByAppendingPathComponent:@"Documents"];
+    NSArray *items = [fm contentsOfDirectoryAtPath:docsDir error:NULL];
+
+    NSMutableArray *arr = [NSMutableArray array];
+    for (NSString *n in items) {
+        if (![n hasSuffix:@".log"]) continue;
+        NSString *full = [docsDir stringByAppendingPathComponent:n];
+        NSDictionary *a = [fm attributesOfItemAtPath:full error:NULL];
+        NSDate *mtime = a[NSFileModificationDate] ?: [NSDate distantPast];
+        unsigned long long sz = [a[NSFileSize] unsignedLongLongValue];
+        [arr addObject:@{@"name": n, @"mtime": mtime, @"size": @(sz)}];
+    }
+    [arr sortUsingComparator:^NSComparisonResult(NSDictionary *x, NSDictionary *y) {
+        return [(NSDate *)y[@"mtime"] compare:(NSDate *)x[@"mtime"]];
+    }];
+    return arr;
+}
+
+// 找最大的 .log
+- (NSDictionary *)largestLogFile {
+    NSArray *arr = [self sortedLogFiles];
+    NSDictionary *best = nil;
+    unsigned long long bestSize = 0;
+    for (NSDictionary *d in arr) {
+        unsigned long long s = [d[@"size"] unsignedLongLongValue];
+        if (s > bestSize) { bestSize = s; best = d; }
+    }
+    return best;
+}
+
 - (NSString *)readText:(NSString *)rel {
     NSString *r = [self targetRoot];
     if (!r) return nil;
@@ -483,53 +518,55 @@ static NSString *const kPrefRel = @"Library/Preferences/com.dfmc.dfpv.sapp.plist
     });
 }
 
-// ⑤ 开锁日志（核心）
+// ⑤ 开锁日志（核心）—— 取最新 + 最大的 log
 - (void)btnUnlockLog {
     if (self.busy) return;
     self.busy = YES;
     [self say:@"抓开锁日志…"];
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
-        NSString *r = [self targetRoot];
-        NSFileManager *fm = [NSFileManager defaultManager];
-
-        // 找 Documents 下最新的 .log
-        NSMutableArray *logs = [NSMutableArray array];
-        NSArray *docs = [fm contentsOfDirectoryAtPath:[r stringByAppendingPathComponent:@"Documents"] error:NULL];
-        for (NSString *n in docs) {
-            if ([n hasSuffix:@".log"]) [logs addObject:n];
-        }
-        [logs sortUsingSelector:@selector(compare:)];
-        NSString *newest = logs.lastObject;
-
         NSMutableString *all = [NSMutableString string];
 
-        if (newest) {
-            NSString *t = [self readText:[NSString stringWithFormat:@"Documents/%@", newest]];
-            NSArray *keys = @[
-                @"Ble", @"BLE", @"ble", @"BleService", @"IngeekBle", @"ICSBle",
-                @"uuid", @"UUID", @"service", @"characteristic",
-                @"connect", @"Connect", @"disconnect", @"Disconnect",
-                @"didConnect", @"didDisconnect", @"didReceiveData",
-                @"RKE", @"rke", @"uri", @"control", @"Control",
-                @"unlock", @"Unlock", @"lock", @"Lock",
-                @"sendSignal", @"sendRequest", @"writePreAuth", @"writeValue",
-                @"preAuth", @"PreAuth", @"status", @"Status",
-                @"challenge", @"Challenge", @"session", @"Session",
-                @"feature", @"Feature", @"mtu", @"MTU",
-                @"[NET] Url", @"error", @"Error", @"code=",
-                @"keyIndex", @"keyId", @"keyTag", @"alias",
-                @"signData", @"insensible", @"approaching", @"beacon"
-            ];
-            NSString *f = [self filterLogText:t keys:keys tailLines:4000 minutes:0
-                                     maxChars:9000
-                                       header:[NSString stringWithFormat:@"##### %@ #####", newest]];
+        // 先列出所有 log
+        NSArray *arr = [self sortedLogFiles];
+        [all appendString:@"===== Documents 下所有 .log =====\n"];
+        for (NSDictionary *d in arr) {
+            [all appendFormat:@"  %-40s %10llu B\n", [d[@"name"] UTF8String],
+                [d[@"size"] unsignedLongLongValue]];
+        }
+        [all appendString:@"\n"];
+
+        NSArray *keys = @[
+            @"Ble", @"BLE", @"ble", @"BleService", @"IngeekBle", @"ICSBle",
+            @"uuid", @"UUID", @"service", @"characteristic",
+            @"connect", @"Connect", @"disconnect", @"Disconnect",
+            @"didConnect", @"didDisconnect", @"didReceiveData",
+            @"RKE", @"rke", @"uri", @"control", @"Control",
+            @"unlock", @"Unlock", @"lock", @"Lock",
+            @"sendSignal", @"sendRequest", @"writePreAuth", @"writeValue",
+            @"preAuth", @"PreAuth", @"status", @"Status",
+            @"challenge", @"Challenge", @"session", @"Session",
+            @"feature", @"Feature", @"mtu", @"MTU",
+            @"[NET] Url", @"error", @"Error", @"code=",
+            @"keyIndex", @"keyId", @"keyTag", @"alias",
+            @"signData", @"insensible", @"approaching", @"beacon"
+        ];
+
+        // 抓前 3 个最新的 log（通常主日志 + IVCS 日志 + ads 日志）
+        NSInteger n = MIN((NSInteger)arr.count, 3);
+        for (NSInteger i = 0; i < n; i++) {
+            NSString *name = arr[i][@"name"];
+            NSString *t = [self readText:[NSString stringWithFormat:@"Documents/%@", name]];
+            NSString *f = [self filterLogText:t keys:keys tailLines:3000 minutes:0
+                                     maxChars:4000
+                                       header:[NSString stringWithFormat:@"##### %@ #####", name]];
             [all appendString:f];
             [all appendString:@"\n\n"];
+            if (all.length > 11000) break;
         }
 
         [self setContent:all];
-        [self say:[NSString stringWithFormat:@"开锁日志 %lu 字符 · %@",
-                   (unsigned long)all.length, newest ?: @"无日志"]];
+        [self say:[NSString stringWithFormat:@"%lu 个日志 · %lu 字符",
+                   (unsigned long)arr.count, (unsigned long)all.length]];
         self.busy = NO;
     });
 }
@@ -628,27 +665,29 @@ static NSString *const kPrefRel = @"Library/Preferences/com.dfmc.dfpv.sapp.plist
     [self say:@"GATT 对照"];
 }
 
-// ⑨ 全部日志（原始，最近 3000 行，仅滤噪）
+// ⑨ 全部日志（取最大的 log，因为主日志 811KB）
 - (void)btnAllLogs {
     if (self.busy) return;
     self.busy = YES;
-    [self say:@"读全部日志…"];
+    [self say:@"读主日志…"];
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
-        NSString *r = [self targetRoot];
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSArray *docs = [fm contentsOfDirectoryAtPath:[r stringByAppendingPathComponent:@"Documents"] error:NULL];
-        NSMutableArray *logs = [NSMutableArray array];
-        for (NSString *n in docs) if ([n hasSuffix:@".log"]) [logs addObject:n];
-        [logs sortUsingSelector:@selector(compare:)];
-        NSString *newest = logs.lastObject;
-        if (!newest) { [self setContent:@"无 .log"]; self.busy = NO; return; }
+        NSDictionary *big = [self largestLogFile];
+        if (!big) { [self setContent:@"无 .log"]; [self say:@"无日志"]; self.busy = NO; return; }
 
-        NSString *t = [self readText:[NSString stringWithFormat:@"Documents/%@", newest]];
-        NSString *f = [self filterLogText:t keys:@[] tailLines:2500 minutes:0
-                                 maxChars:10000
-                                   header:[NSString stringWithFormat:@"##### %@ (仅滤噪) #####", newest]];
-        [self setContent:f];
-        [self say:[NSString stringWithFormat:@"全部日志 %lu 字符", (unsigned long)f.length]];
+        NSString *name = big[@"name"];
+        unsigned long long sz = [big[@"size"] unsignedLongLongValue];
+
+        NSMutableString *o = [NSMutableString string];
+        [o appendFormat:@"===== 主日志: %@ (%llu B) =====\n\n", name, sz];
+
+        NSString *t = [self readText:[NSString stringWithFormat:@"Documents/%@", name]];
+        NSString *f = [self filterLogText:t keys:@[] tailLines:3000 minutes:0
+                                 maxChars:9000 header:@"(仅滤噪，最近 3000 行)"];
+        [o appendString:f];
+
+        [self setContent:o];
+        [self say:[NSString stringWithFormat:@"%@ · %llu B · %lu 字符",
+                   name, sz, (unsigned long)o.length]];
         self.busy = NO;
     });
 }
