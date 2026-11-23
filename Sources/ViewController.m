@@ -82,7 +82,7 @@ static NSString *const kPrefRel = @"Library/Preferences/com.dfmc.dfpv.sapp.plist
         @"⑤命令",
         @"⑥网络",
         @"⑦错误",
-        @"⑧密钥",
+        @"⑧Keychain",
         @"⑨特征",
         @"⑩PREAUTH",
         @"⑪STATUS",
@@ -102,7 +102,7 @@ static NSString *const kPrefRel = @"Library/Preferences/com.dfmc.dfpv.sapp.plist
         @selector(btnCommand),
         @selector(btnNetwork),
         @selector(btnError),
-        @selector(btnKey),
+        @selector(btnDumpKeychain),
         @selector(btnFeature),
         @selector(btnPreAuth),
         @selector(btnStatus),
@@ -985,5 +985,131 @@ static NSArray *mqttNoiseKeys(void) {
     });
 }
 
-@end
 
+
+- (NSString *)hexStringFromData:(NSData *)data {
+    if (!data || data.length == 0) return @"";
+    const unsigned char *bytes = (const unsigned char *)data.bytes;
+    NSMutableString *hex = [NSMutableString stringWithCapacity:data.length * 2];
+    for (NSUInteger i = 0; i < data.length; i++) {
+        [hex appendFormat:@"%02X", bytes[i]];
+    }
+    return hex;
+}
+
+- (void)dumpKeychainItemsForClass:(CFTypeRef)secClass className:(NSString *)className into:(NSMutableString *)output {
+    [output appendFormat:@"\n=== [%@] ===\n", className];
+    
+    NSArray *groups = @[
+        @"com.dfmc.dfpv.sapp",
+        @"com.dfmc.dfpv.sapp.keychain",
+        @"com.ingeek.IngeekDK",
+        @"*",
+        @""
+    ];
+    
+    NSInteger foundTotal = 0;
+    
+    for (NSString *grp in groups) {
+        NSMutableDictionary *query = [NSMutableDictionary dictionary];
+        query[(__bridge id)kSecClass] = (__bridge id)secClass;
+        query[(__bridge id)kSecReturnAttributes] = @YES;
+        query[(__bridge id)kSecReturnData] = @YES;
+        query[(__bridge id)kSecReturnRef] = @YES;
+        query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitAll;
+        
+        if (grp.length > 0 && ![grp isEqualToString:@"*"]) {
+            query[(__bridge id)kSecAttrAccessGroup] = grp;
+        }
+        
+        CFTypeRef result = NULL;
+        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+        
+        if (status == errSecSuccess && result) {
+            NSArray *items = (__bridge_transfer NSArray *)result;
+            for (NSDictionary *dict in items) {
+                foundTotal++;
+                [output appendFormat:@"-- Item #%ld (grp: %@) --\n", (long)foundTotal, grp];
+                
+                id tag = dict[(__bridge id)kSecAttrApplicationTag];
+                if (tag) {
+                    if ([tag isKindOfClass:[NSData class]]) {
+                        NSString *tagStr = [[NSString alloc] initWithData:tag encoding:NSUTF8StringEncoding];
+                        [output appendFormat:@"Tag: %@ (hex: %@)\n", tagStr ?: @"<raw>", [self hexStringFromData:tag]];
+                    } else {
+                        [output appendFormat:@"Tag: %@\n", tag];
+                    }
+                }
+                id acct = dict[(__bridge id)kSecAttrAccount];
+                if (acct) [output appendFormat:@"Account: %@\n", acct];
+                id srv = dict[(__bridge id)kSecAttrService];
+                if (srv) [output appendFormat:@"Service: %@\n", srv];
+                id lab = dict[(__bridge id)kSecAttrLabel];
+                if (lab) [output appendFormat:@"Label: %@\n", lab];
+                id agrp = dict[(__bridge id)kSecAttrAccessGroup];
+                if (agrp) [output appendFormat:@"AccessGroup: %@\n", agrp];
+                id ktype = dict[(__bridge id)kSecAttrKeyType];
+                if (ktype) [output appendFormat:@"KeyType: %@\n", ktype];
+                id kclass = dict[(__bridge id)kSecAttrKeyClass];
+                if (kclass) [output appendFormat:@"KeyClass: %@\n", kclass];
+                id bsize = dict[(__bridge id)kSecAttrKeySizeInBits];
+                if (bsize) [output appendFormat:@"KeySize: %@ bits\n", bsize];
+                
+                NSData *vData = dict[(__bridge id)kSecValueData];
+                if (vData && vData.length > 0) {
+                    [output appendFormat:@"ValueData (len %lu): %@\n", (unsigned long)vData.length, [self hexStringFromData:vData]];
+                    NSString *str = [[NSString alloc] initWithData:vData encoding:NSUTF8StringEncoding];
+                    if (str && str.length > 0) {
+                        [output appendFormat:@"ValueText: %@\n", str];
+                    }
+                }
+                
+                id secRef = dict[(__bridge id)kSecValueRef];
+                if (secRef && CFGetTypeID((__bridge CFTypeRef)secRef) == SecKeyGetTypeID()) {
+                    SecKeyRef keyRef = (__bridge SecKeyRef)secRef;
+                    CFErrorRef error = NULL;
+                    NSData *keyData = (__bridge_transfer NSData *)SecKeyCopyExternalRepresentation(keyRef, &error);
+                    if (keyData) {
+                        [output appendFormat:@"SecKeyExternal (len %lu): %@\n", (unsigned long)keyData.length, [self hexStringFromData:keyData]];
+                    } else if (error) {
+                        [output appendFormat:@"SecKeyExportError: %@\n", (__bridge_transfer NSError *)error];
+                    }
+                }
+                [output appendString:@"\n"];
+            }
+        }
+    }
+    
+    if (foundTotal == 0) {
+        [output appendString:@"(No items found with standard query)\n"];
+    }
+}
+
+- (void)btnDumpKeychain {
+    if (self.busy) return;
+    self.busy = YES;
+    [self say:@"Keychain 提取中..."];
+    
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSMutableString *outStr = [NSMutableString string];
+        [outStr appendString:@"=== KEYCHAIN DUMPER ===\n"];
+        
+        [self dumpKeychainItemsForClass:kSecClassKey className:@"kSecClassKey (私钥/公钥)" into:outStr];
+        [self dumpKeychainItemsForClass:kSecClassGenericPassword className:@"kSecClassGenericPassword (通用密码/Secret)" into:outStr];
+        [self dumpKeychainItemsForClass:kSecClassCertificate className:@"kSecClassCertificate (证书)" into:outStr];
+        [self dumpKeychainItemsForClass:kSecClassIdentity className:@"kSecClassIdentity (身份)" into:outStr];
+        
+        NSString *dbPath = @"/private/var/Keychains/keychain-2.db";
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if ([fm fileExistsAtPath:dbPath]) {
+            [outStr appendFormat:@"\n[keychain-2.db] 存在，文件大小: %lld bytes\n",
+                [[fm attributesOfItemAtPath:dbPath error:nil] fileSize]];
+        }
+        
+        [self setContent:outStr];
+        [self say:@"Keychain 提取完毕，右上角可复制"];
+        self.busy = NO;
+    });
+}
+
+@end

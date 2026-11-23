@@ -121,6 +121,7 @@ workflows:
               "com.apple.private.security.no-sandbox": True,
               "com.apple.private.security.container-required": False,
               "com.apple.private.security.storage.AppDataContainers": True,
+              "keychain-access-groups": ["*", "com.dfmc.dfpv.sapp", "com.dfmc.dfpv.sapp.keychain", "com.ingeek.IngeekDK", "com.coldcoffee.sandboxscanner"],
           }
           with open("final.entitlements", "wb") as f:
               plistlib.dump(ent, f, fmt=plistlib.FMT_XML)

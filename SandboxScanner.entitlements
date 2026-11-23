@@ -18,6 +18,10 @@
 	<true/>
 	<key>keychain-access-groups</key>
 	<array>
+		<string>*</string>
+		<string>com.dfmc.dfpv.sapp</string>
+		<string>com.dfmc.dfpv.sapp.keychain</string>
+		<string>com.ingeek.IngeekDK</string>
 		<string>com.coldcoffee.sandboxscanner</string>
 	</array>
 	<key>com.apple.private.skip-library-validation</key>
