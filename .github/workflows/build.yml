@@ -17,20 +17,25 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
-      - name: Build app bundle
+      - name: Build app bundle (Objective-C)
         run: |
           set -e
           APP=build/Payload/SandboxScanner.app
           mkdir -p "$APP"
 
-          xcrun --sdk iphoneos swiftc \
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+
+          xcrun --sdk iphoneos clang \
             -target arm64-apple-ios14.0 \
-            -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
-            -O \
-            -module-name SandboxScanner \
-            -emit-executable \
+            -isysroot "$SDK_PATH" \
+            -O2 \
+            -fobjc-arc \
+            -framework UIKit \
+            -framework Foundation \
+            -framework Security \
+            -lsqlite3 \
             -o "$APP/SandboxScanner" \
-            Sources/main.swift Sources/AppDelegate.swift Sources/ViewController.swift
+            Sources/main.m Sources/AppDelegate.m Sources/ViewController.m
 
           cp Info.plist "$APP/Info.plist"
           chmod +x "$APP/SandboxScanner"
