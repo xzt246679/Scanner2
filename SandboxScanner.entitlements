@@ -2,36 +2,20 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>application-identifier</key>
-	<string>com.coldcoffee.sandboxscanner</string>
-	<key>com.apple.developer.team-identifier</key>
-	<string>COLDFCOFFEE</string>
-	<key>get-task-allow</key>
-	<true/>
 	<key>platform-application</key>
 	<true/>
-	<key>com.apple.private.security.no-sandbox</key>
+	<key>com.apple.private.security.no-container</key>
 	<true/>
-	<key>com.apple.private.security.container-required</key>
-	<false/>
-	<key>com.apple.private.security.storage.AppDataContainers</key>
+	<key>com.apple.private.skip-library-validation</key>
 	<true/>
 	<key>keychain-access-groups</key>
 	<array>
+		<string>*</string>
 		<string>PP2H83DFYG.com.dfmc.dfpv.sapp</string>
 		<string>PP2H83DFYG.com.dfmc.dfpv.sapp.Widget</string>
-		<string>*</string>
 		<string>com.dfmc.dfpv.sapp</string>
 		<string>com.dfmc.dfpv.sapp.keychain</string>
 		<string>com.ingeek.IngeekDK</string>
-		<string>com.coldcoffee.sandboxscanner</string>
-	</array>
-	<key>com.apple.private.skip-library-validation</key>
-	<true/>
-	<key>com.apple.security.exception.files.absolute-path.read-only</key>
-	<array>
-		<string>/var/</string>
-		<string>/private/var/</string>
 	</array>
 </dict>
 </plist>
