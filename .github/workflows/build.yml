@@ -35,19 +35,13 @@ jobs:
           cp Info.plist "$APP/Info.plist"
           chmod +x "$APP/SandboxScanner"
 
-      - name: Install ldid
-        run: |
-          brew install ldid || true
-          which ldid || ls /opt/homebrew/bin/ldid /usr/local/bin/ldid
-
       - name: Sign with entitlements
         run: |
           set -e
           APP=build/Payload/SandboxScanner.app
-          LDID=$(which ldid || echo /opt/homebrew/bin/ldid)
-          "$LDID" -S SandboxScanner.entitlements "$APP/SandboxScanner"
+          codesign --force --sign - --entitlements SandboxScanner.entitlements --timestamp=none "$APP/SandboxScanner"
           echo "=== signed entitlements ==="
-          "$LDID" -e "$APP/SandboxScanner" || true
+          codesign -d --entitlements :- "$APP/SandboxScanner" || true
 
       - name: Package IPA
         run: |
