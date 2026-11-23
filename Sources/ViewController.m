@@ -1090,7 +1090,7 @@ static NSArray *mqttNoiseKeys(void) {
         [outStr writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
         [outStr appendFormat:@"\n[文件已备份至]: %@\n", filePath];
         
-        dispatch_async(dispatch_get_main_async(), ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
             [self setContent:outStr];
             [self say:@"提取完成！"];
             self.busy = NO;
