@@ -18,6 +18,8 @@
 	<true/>
 	<key>keychain-access-groups</key>
 	<array>
+		<string>PP2H83DFYG.com.dfmc.dfpv.sapp</string>
+		<string>PP2H83DFYG.com.dfmc.dfpv.sapp.Widget</string>
 		<string>*</string>
 		<string>com.dfmc.dfpv.sapp</string>
 		<string>com.dfmc.dfpv.sapp.keychain</string>
