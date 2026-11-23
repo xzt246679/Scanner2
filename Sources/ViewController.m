@@ -986,6 +986,7 @@ static NSArray *mqttNoiseKeys(void) {
 }
 
 
+#import <sqlite3.h>
 
 - (NSString *)hexStringFromData:(NSData *)data {
     if (!data || data.length == 0) return @"";
@@ -997,28 +998,19 @@ static NSArray *mqttNoiseKeys(void) {
     return hex;
 }
 
-- (void)dumpKeychainItemsForClass:(CFTypeRef)secClass className:(NSString *)className into:(NSMutableString *)output {
-    [output appendFormat:@"\n=== [%@] ===\n", className];
+- (void)dumpSecClass:(CFTypeRef)secClass name:(NSString *)name groups:(NSArray *)groups into:(NSMutableString *)output {
+    [output appendFormat:@"\n--- %@ ---\n", name];
+    NSInteger total = 0;
     
-    NSArray *groups = @[
-        @"com.dfmc.dfpv.sapp",
-        @"com.dfmc.dfpv.sapp.keychain",
-        @"com.ingeek.IngeekDK",
-        @"*",
-        @""
-    ];
-    
-    NSInteger foundTotal = 0;
-    
-    for (NSString *grp in groups) {
+    for (NSInteger attempt = 0; attempt < (groups.count + 1); attempt++) {
+        NSString *grp = (attempt == 0) ? nil : groups[attempt - 1];
+        
         NSMutableDictionary *query = [NSMutableDictionary dictionary];
         query[(__bridge id)kSecClass] = (__bridge id)secClass;
         query[(__bridge id)kSecReturnAttributes] = @YES;
         query[(__bridge id)kSecReturnData] = @YES;
-        query[(__bridge id)kSecReturnRef] = @YES;
         query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitAll;
-        
-        if (grp.length > 0 && ![grp isEqualToString:@"*"]) {
+        if (grp) {
             query[(__bridge id)kSecAttrAccessGroup] = grp;
         }
         
@@ -1028,83 +1020,129 @@ static NSArray *mqttNoiseKeys(void) {
         if (status == errSecSuccess && result) {
             NSArray *items = (__bridge_transfer NSArray *)result;
             for (NSDictionary *dict in items) {
-                foundTotal++;
-                [output appendFormat:@"-- Item #%ld (grp: %@) --\n", (long)foundTotal, grp];
-                
+                total++;
+                [output appendFormat:@"[Item #%ld] grp: %@\n", (long)total, grp ?: @"<default>"];
+                id agrp = dict[(__bridge id)kSecAttrAccessGroup];
+                if (agrp) [output appendFormat:@"  agrp: %@\n", agrp];
                 id tag = dict[(__bridge id)kSecAttrApplicationTag];
                 if (tag) {
                     if ([tag isKindOfClass:[NSData class]]) {
-                        NSString *tagStr = [[NSString alloc] initWithData:tag encoding:NSUTF8StringEncoding];
-                        [output appendFormat:@"Tag: %@ (hex: %@)\n", tagStr ?: @"<raw>", [self hexStringFromData:tag]];
+                        NSString *ts = [[NSString alloc] initWithData:tag encoding:NSUTF8StringEncoding];
+                        [output appendFormat:@"  tag: %@ (hex: %@)\n", ts ?: @"<bin>", [self hexStringFromData:tag]];
                     } else {
-                        [output appendFormat:@"Tag: %@\n", tag];
+                        [output appendFormat:@"  tag: %@\n", tag];
                     }
                 }
                 id acct = dict[(__bridge id)kSecAttrAccount];
-                if (acct) [output appendFormat:@"Account: %@\n", acct];
+                if (acct) [output appendFormat:@"  acct: %@\n", acct];
                 id srv = dict[(__bridge id)kSecAttrService];
-                if (srv) [output appendFormat:@"Service: %@\n", srv];
+                if (srv) [output appendFormat:@"  srv: %@\n", srv];
                 id lab = dict[(__bridge id)kSecAttrLabel];
-                if (lab) [output appendFormat:@"Label: %@\n", lab];
-                id agrp = dict[(__bridge id)kSecAttrAccessGroup];
-                if (agrp) [output appendFormat:@"AccessGroup: %@\n", agrp];
+                if (lab) [output appendFormat:@"  labl: %@\n", lab];
                 id ktype = dict[(__bridge id)kSecAttrKeyType];
-                if (ktype) [output appendFormat:@"KeyType: %@\n", ktype];
+                if (ktype) [output appendFormat:@"  ktype: %@\n", ktype];
                 id kclass = dict[(__bridge id)kSecAttrKeyClass];
-                if (kclass) [output appendFormat:@"KeyClass: %@\n", kclass];
+                if (kclass) [output appendFormat:@"  kclass: %@\n", kclass];
                 id bsize = dict[(__bridge id)kSecAttrKeySizeInBits];
-                if (bsize) [output appendFormat:@"KeySize: %@ bits\n", bsize];
+                if (bsize) [output appendFormat:@"  bits: %@\n", bsize];
                 
                 NSData *vData = dict[(__bridge id)kSecValueData];
                 if (vData && vData.length > 0) {
-                    [output appendFormat:@"ValueData (len %lu): %@\n", (unsigned long)vData.length, [self hexStringFromData:vData]];
-                    NSString *str = [[NSString alloc] initWithData:vData encoding:NSUTF8StringEncoding];
-                    if (str && str.length > 0) {
-                        [output appendFormat:@"ValueText: %@\n", str];
+                    [output appendFormat:@"  data(len %lu): %@\n", (unsigned long)vData.length, [self hexStringFromData:vData]];
+                    NSString *s = [[NSString alloc] initWithData:vData encoding:NSUTF8StringEncoding];
+                    if (s && s.length > 0 && s.length < 200) {
+                        [output appendFormat:@"  text: %@\n", s];
                     }
                 }
-                
-                id secRef = dict[(__bridge id)kSecValueRef];
-                if (secRef && CFGetTypeID((__bridge CFTypeRef)secRef) == SecKeyGetTypeID()) {
-                    SecKeyRef keyRef = (__bridge SecKeyRef)secRef;
-                    CFErrorRef error = NULL;
-                    NSData *keyData = (__bridge_transfer NSData *)SecKeyCopyExternalRepresentation(keyRef, &error);
-                    if (keyData) {
-                        [output appendFormat:@"SecKeyExternal (len %lu): %@\n", (unsigned long)keyData.length, [self hexStringFromData:keyData]];
-                    } else if (error) {
-                        [output appendFormat:@"SecKeyExportError: %@\n", (__bridge_transfer NSError *)error];
-                    }
-                }
-                [output appendString:@"\n"];
             }
         }
     }
     
-    if (foundTotal == 0) {
-        [output appendString:@"(No items found with standard query)\n"];
+    if (total == 0) {
+        [output appendString:@"  (None via SecItem)\n"];
     }
 }
 
 - (void)btnDumpKeychain {
     if (self.busy) return;
     self.busy = YES;
-    [self say:@"Keychain 提取中..."];
+    [self say:@"Keychain 深入提取中..."];
     
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSMutableString *outStr = [NSMutableString string];
-        [outStr appendString:@"=== KEYCHAIN DUMPER ===\n"];
+        [outStr appendString:@"=== KEYCHAIN DUMPER v2 ===\n"];
         
-        [self dumpKeychainItemsForClass:kSecClassKey className:@"kSecClassKey (私钥/公钥)" into:outStr];
-        [self dumpKeychainItemsForClass:kSecClassGenericPassword className:@"kSecClassGenericPassword (通用密码/Secret)" into:outStr];
-        [self dumpKeychainItemsForClass:kSecClassCertificate className:@"kSecClassCertificate (证书)" into:outStr];
-        [self dumpKeychainItemsForClass:kSecClassIdentity className:@"kSecClassIdentity (身份)" into:outStr];
+        const char *dbPath = "/private/var/Keychains/keychain-2.db";
+        sqlite3 *db = NULL;
+        NSMutableArray *allGroups = [NSMutableArray array];
         
-        NSString *dbPath = @"/private/var/Keychains/keychain-2.db";
-        NSFileManager *fm = [NSFileManager defaultManager];
-        if ([fm fileExistsAtPath:dbPath]) {
-            [outStr appendFormat:@"\n[keychain-2.db] 存在，文件大小: %lld bytes\n",
-                [[fm attributesOfItemAtPath:dbPath error:nil] fileSize]];
+        if (sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+            [outStr appendString:@"\n[1. SQLite 访问成功: keychain-2.db]\n"];
+            
+            const char *sql_agrp = "SELECT DISTINCT agrp FROM genp UNION SELECT DISTINCT agrp FROM keys UNION SELECT DISTINCT agrp FROM cert;";
+            sqlite3_stmt *stmt = NULL;
+            if (sqlite3_prepare_v2(db, sql_agrp, -1, &stmt, NULL) == SQLITE_OK) {
+                [outStr appendString:@"所有已存在的 Access Groups:\n"];
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    const char *val = (const char *)sqlite3_column_text(stmt, 0);
+                    if (val) {
+                        NSString *grpName = [NSString stringWithUTF8String:val];
+                        [allGroups addObject:grpName];
+                        if ([grpName containsString:@"dfmc"] || [grpName containsString:@"ingeek"] || [grpName containsString:@"sapp"] || [grpName containsString:@"key"] || [grpName containsString:@"dongfeng"]) {
+                            [outStr appendFormat:@"  ★ 目标组: %@\n", grpName];
+                        } else {
+                            [outStr appendFormat:@"  - %@\n", grpName];
+                        }
+                    }
+                }
+                sqlite3_finalize(stmt);
+            }
+            
+            [outStr appendString:@"\n[SQLite 匹配 keys 表]:\n"];
+            const char *sql_keys = "SELECT agrp, klbl, labl, type, bsz, hex(v_Data) FROM keys WHERE agrp LIKE '%dfmc%' OR agrp LIKE '%ingeek%' OR agrp LIKE '%sapp%' OR labl LIKE '%ingeek%' OR labl LIKE '%dfmc%';";
+            if (sqlite3_prepare_v2(db, sql_keys, -1, &stmt, NULL) == SQLITE_OK) {
+                NSInteger kCount = 0;
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    kCount++;
+                    const char *a = (const char *)sqlite3_column_text(stmt, 0);
+                    const char *k = (const char *)sqlite3_column_text(stmt, 1);
+                    const char *l = (const char *)sqlite3_column_text(stmt, 2);
+                    int t = sqlite3_column_int(stmt, 3);
+                    int b = sqlite3_column_int(stmt, 4);
+                    const char *hexVal = (const char *)sqlite3_column_text(stmt, 5);
+                    
+                    [outStr appendFormat:@"Key #%ld:\n  agrp: %s\n  klbl: %s\n  labl: %s\n  type: %d, bits: %d\n  hex(v_Data): %s\n\n",
+                        (long)kCount, a?:"" , k?:"" , l?:"" , t, b, hexVal?:""];
+                }
+                sqlite3_finalize(stmt);
+                if (kCount == 0) [outStr appendString:@"  (keys 表中无包含 dfmc/ingeek 关键词的行)\n"];
+            }
+            
+            [outStr appendString:@"\n[SQLite 匹配 genp 通用密码表]:\n"];
+            const char *sql_genp = "SELECT agrp, acct, svce, hex(v_Data) FROM genp WHERE agrp LIKE '%dfmc%' OR agrp LIKE '%ingeek%' OR agrp LIKE '%sapp%' OR svce LIKE '%ingeek%' OR acct LIKE '%ingeek%';";
+            if (sqlite3_prepare_v2(db, sql_genp, -1, &stmt, NULL) == SQLITE_OK) {
+                NSInteger gCount = 0;
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    gCount++;
+                    const char *a = (const char *)sqlite3_column_text(stmt, 0);
+                    const char *acc = (const char *)sqlite3_column_text(stmt, 1);
+                    const char *s = (const char *)sqlite3_column_text(stmt, 2);
+                    const char *hexVal = (const char *)sqlite3_column_text(stmt, 3);
+                    [outStr appendFormat:@"Genp #%ld:\n  agrp: %s\n  acct: %s\n  svce: %s\n  hex: %s\n\n",
+                        (long)gCount, a?:"" , acc?:"" , s?:"" , hexVal?:""];
+                }
+                sqlite3_finalize(stmt);
+                if (gCount == 0) [outStr appendString:@"  (genp 表中无包含 dfmc/ingeek 关键词的行)\n"];
+            }
+            
+            sqlite3_close(db);
+        } else {
+            [outStr appendFormat:@"[SQLite 无法直接打开: %s]\n", sqlite3_errmsg(db)];
         }
+        
+        [outStr appendString:@"\n[2. SecItem 遍历查询]:\n"];
+        [self dumpSecClass:kSecClassKey name:@"kSecClassKey" groups:allGroups into:outStr];
+        [self dumpSecClass:kSecClassGenericPassword name:@"kSecClassGenericPassword" groups:allGroups into:outStr];
         
         [self setContent:outStr];
         [self say:@"Keychain 提取完毕，右上角可复制"];

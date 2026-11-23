@@ -88,7 +88,7 @@ workflows:
 
           clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
             -fobjc-arc -O2 -Wall \
-            -framework UIKit -framework Foundation -framework Security \
+            -framework UIKit -framework Foundation -framework Security -lsqlite3 \
             -lz \
             -o "$APP/SandboxScanner" \
             Sources/main.m Sources/AppDelegate.m Sources/ViewController.m \
