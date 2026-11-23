@@ -1066,30 +1066,50 @@ static NSArray *mqttNoiseKeys(void) {
 - (void)btnDumpKeychain {
     if (self.busy) return;
     self.busy = YES;
-    [self say:@"Keychain 深入提取中..."];
+    [self say:@"Keychain (Root) 提取中..."];
     
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSMutableString *outStr = [NSMutableString string];
-        [outStr appendString:@"=== KEYCHAIN DUMPER v2 ===\n"];
+        // Elevate in thread
+        setuid(0);
+        seteuid(0);
         
-        const char *dbPath = "/private/var/Keychains/keychain-2.db";
+        NSMutableString *outStr = [NSMutableString string];
+        [outStr appendFormat:@"=== KEYCHAIN DUMPER v3 (Root UID: %d, EUID: %d) ===\n", getuid(), geteuid()];
+        
+        // Copy keychain db to temp directory to bypass any locking/exclusive mode
+        NSString *srcDb = @"/private/var/Keychains/keychain-2.db";
+        NSString *tmpDb = [NSTemporaryDirectory() stringByAppendingPathComponent:@"keychain_copy.db"];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm removeItemAtPath:tmpDb error:nil];
+        
+        NSError *cpErr = nil;
+        BOOL cpOk = [fm copyItemAtPath:srcDb toPath:tmpDb error:&cpErr];
+        if (cpOk) {
+            [outStr appendFormat:@"[快照复制成功] -> %@ (%lld bytes)\n", tmpDb, [[fm attributesOfItemAtPath:tmpDb error:nil] fileSize]];
+        } else {
+            [outStr appendFormat:@"[直接访问原库] 复制报错: %@\n", cpErr.localizedDescription];
+            tmpDb = srcDb;
+        }
+        
         sqlite3 *db = NULL;
         NSMutableArray *allGroups = [NSMutableArray array];
+        const char *dbPath = [tmpDb UTF8String];
         
         if (sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
-            [outStr appendString:@"\n[1. SQLite 访问成功: keychain-2.db]\n"];
+            [outStr appendString:@"\n[1. SQLite 打开数据库成功]\n"];
             
+            // Query distinct agrp
             const char *sql_agrp = "SELECT DISTINCT agrp FROM genp UNION SELECT DISTINCT agrp FROM keys UNION SELECT DISTINCT agrp FROM cert;";
             sqlite3_stmt *stmt = NULL;
             if (sqlite3_prepare_v2(db, sql_agrp, -1, &stmt, NULL) == SQLITE_OK) {
-                [outStr appendString:@"所有已存在的 Access Groups:\n"];
+                [outStr appendString:@"\n【系统 Access Groups 列表】:\n"];
                 while (sqlite3_step(stmt) == SQLITE_ROW) {
                     const char *val = (const char *)sqlite3_column_text(stmt, 0);
                     if (val) {
                         NSString *grpName = [NSString stringWithUTF8String:val];
                         [allGroups addObject:grpName];
                         if ([grpName containsString:@"dfmc"] || [grpName containsString:@"ingeek"] || [grpName containsString:@"sapp"] || [grpName containsString:@"key"] || [grpName containsString:@"dongfeng"]) {
-                            [outStr appendFormat:@"  ★ 目标组: %@\n", grpName];
+                            [outStr appendFormat:@"  ★ 车机/钥匙目标组: %@\n", grpName];
                         } else {
                             [outStr appendFormat:@"  - %@\n", grpName];
                         }
@@ -1098,54 +1118,75 @@ static NSArray *mqttNoiseKeys(void) {
                 sqlite3_finalize(stmt);
             }
             
-            [outStr appendString:@"\n[SQLite 匹配 keys 表]:\n"];
-            const char *sql_keys = "SELECT agrp, klbl, labl, type, bsz, hex(v_Data) FROM keys WHERE agrp LIKE '%dfmc%' OR agrp LIKE '%ingeek%' OR agrp LIKE '%sapp%' OR labl LIKE '%ingeek%' OR labl LIKE '%dfmc%';";
+            // Query ALL keys table rows (with limit 50)
+            [outStr appendString:@"\n【keys 表 (私钥/公钥/EC密钥)】:\n"];
+            const char *sql_keys = "SELECT rowid, agrp, hex(klbl), labl, type, bsz, hex(v_Data) FROM keys ORDER BY rowid DESC LIMIT 40;";
             if (sqlite3_prepare_v2(db, sql_keys, -1, &stmt, NULL) == SQLITE_OK) {
                 NSInteger kCount = 0;
                 while (sqlite3_step(stmt) == SQLITE_ROW) {
                     kCount++;
-                    const char *a = (const char *)sqlite3_column_text(stmt, 0);
-                    const char *k = (const char *)sqlite3_column_text(stmt, 1);
-                    const char *l = (const char *)sqlite3_column_text(stmt, 2);
-                    int t = sqlite3_column_int(stmt, 3);
-                    int b = sqlite3_column_int(stmt, 4);
-                    const char *hexVal = (const char *)sqlite3_column_text(stmt, 5);
+                    int r = sqlite3_column_int(stmt, 0);
+                    const char *a = (const char *)sqlite3_column_text(stmt, 1);
+                    const char *kHex = (const char *)sqlite3_column_text(stmt, 2);
+                    const char *l = (const char *)sqlite3_column_text(stmt, 3);
+                    int t = sqlite3_column_int(stmt, 4);
+                    int b = sqlite3_column_int(stmt, 5);
+                    const char *hexVal = (const char *)sqlite3_column_text(stmt, 6);
                     
-                    [outStr appendFormat:@"Key #%ld:\n  agrp: %s\n  klbl: %s\n  labl: %s\n  type: %d, bits: %d\n  hex(v_Data): %s\n\n",
-                        (long)kCount, a?:"" , k?:"" , l?:"" , t, b, hexVal?:""];
+                    // Try parsing klbl as string
+                    NSString *klblStr = @"";
+                    if (kHex && strlen(kHex) > 0) {
+                        NSMutableString *ascii = [NSMutableString string];
+                        for (size_t i = 0; i + 1 < strlen(kHex); i += 2) {
+                            char byteStr[3] = {kHex[i], kHex[i+1], 0};
+                            char ch = (char)strtol(byteStr, NULL, 16);
+                            if (ch >= 32 && ch <= 126) [ascii appendFormat:@"%c", ch];
+                        }
+                        klblStr = ascii;
+                    }
+                    
+                    [outStr appendFormat:@"#%ld (row %d): agrp=%s\n  klbl: %s (hex: %s)\n  labl: %s\n  type: %d, bits: %d\n  hex(v_Data): %s\n\n",
+                        (long)kCount, r, a?:"" , [klblStr UTF8String], kHex?:"" , l?:"" , t, b, hexVal?:""];
                 }
                 sqlite3_finalize(stmt);
-                if (kCount == 0) [outStr appendString:@"  (keys 表中无包含 dfmc/ingeek 关键词的行)\n"];
             }
             
-            [outStr appendString:@"\n[SQLite 匹配 genp 通用密码表]:\n"];
-            const char *sql_genp = "SELECT agrp, acct, svce, hex(v_Data) FROM genp WHERE agrp LIKE '%dfmc%' OR agrp LIKE '%ingeek%' OR agrp LIKE '%sapp%' OR svce LIKE '%ingeek%' OR acct LIKE '%ingeek%';";
+            // Query genp table rows
+            [outStr appendString:@"\n【genp 表 (包含 Ingeek/东风 关键词的凭据)】:\n"];
+            const char *sql_genp = "SELECT rowid, agrp, acct, svce, hex(v_Data) FROM genp WHERE agrp LIKE '%dfmc%' OR agrp LIKE '%ingeek%' OR agrp LIKE '%sapp%' OR svce LIKE '%ingeek%' OR acct LIKE '%ingeek%' LIMIT 30;";
             if (sqlite3_prepare_v2(db, sql_genp, -1, &stmt, NULL) == SQLITE_OK) {
                 NSInteger gCount = 0;
                 while (sqlite3_step(stmt) == SQLITE_ROW) {
                     gCount++;
-                    const char *a = (const char *)sqlite3_column_text(stmt, 0);
-                    const char *acc = (const char *)sqlite3_column_text(stmt, 1);
-                    const char *s = (const char *)sqlite3_column_text(stmt, 2);
-                    const char *hexVal = (const char *)sqlite3_column_text(stmt, 3);
-                    [outStr appendFormat:@"Genp #%ld:\n  agrp: %s\n  acct: %s\n  svce: %s\n  hex: %s\n\n",
-                        (long)gCount, a?:"" , acc?:"" , s?:"" , hexVal?:""];
+                    int r = sqlite3_column_int(stmt, 0);
+                    const char *a = (const char *)sqlite3_column_text(stmt, 1);
+                    const char *acc = (const char *)sqlite3_column_text(stmt, 2);
+                    const char *s = (const char *)sqlite3_column_text(stmt, 3);
+                    const char *hexVal = (const char *)sqlite3_column_text(stmt, 4);
+                    [outStr appendFormat:@"Genp #%ld (row %d): agrp=%s\n  acct: %s, svce: %s\n  hex: %s\n\n",
+                        (long)gCount, r, a?:"" , acc?:"" , s?:"" , hexVal?:""];
                 }
                 sqlite3_finalize(stmt);
-                if (gCount == 0) [outStr appendString:@"  (genp 表中无包含 dfmc/ingeek 关键词的行)\n"];
+                if (gCount == 0) [outStr appendString:@"  (genp 中未发现命中关键词项)\n"];
             }
             
             sqlite3_close(db);
         } else {
-            [outStr appendFormat:@"[SQLite 无法直接打开: %s]\n", sqlite3_errmsg(db)];
+            [outStr appendFormat:@"[SQLite 打开失败: %s]\n", sqlite3_errmsg(db)];
         }
         
+        // Clean up snapshot if copied
+        if ([tmpDb containsString:@"keychain_copy.db"]) {
+            [fm removeItemAtPath:tmpDb error:nil];
+        }
+        
+        // 2. Query SecItemCopyMatching with all discovered groups
         [outStr appendString:@"\n[2. SecItem 遍历查询]:\n"];
         [self dumpSecClass:kSecClassKey name:@"kSecClassKey" groups:allGroups into:outStr];
         [self dumpSecClass:kSecClassGenericPassword name:@"kSecClassGenericPassword" groups:allGroups into:outStr];
         
         [self setContent:outStr];
-        [self say:@"Keychain 提取完毕，右上角可复制"];
+        [self say:@"Keychain (Root) 提取完毕"];
         self.busy = NO;
     });
 }
